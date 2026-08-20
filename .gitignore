@@ -1,0 +1,55 @@
+# 提取产物
+extracted_app/
+
+# codex-web 上游克隆（含 565MB 解包产物）与复制的 codex.exe
+codex-web-upstream/
+codex-bin/
+server.log
+
+# 发行包
+dist/
+
+# Node
+node_modules/
+/package-lock.json
+
+# 临时/调试
+*.png
+!apps/web-hub/public/*.png
+!apps/web-hub/public/icons/*.png
+!apps/mobile/assets/*.png
+*.html
+!apps/web-hub/public/*.html
+dom_*.html
+debug_*.js
+
+# 运行态 / 本地数据
+codex-web-state/
+vendor/
+apps/web-hub/server.log
+apps/web-hub/server.err.log
+apps/web-hub/logs/
+apps/web-hub/server/.vapid.json
+apps/web-hub/server/.push-subscriptions.json
+apps/web-hub/server/.jpush.json
+apps/web-hub/server/.jpush-devices.json
+
+# 测试产物 / 编辑器本地状态
+tests/artifacts/
+.zcode/
+**/.claude/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# 含本机路径 / 服务器 IP / SSH，只留本地
+docs/OPS.md
+apps/relay-edge/
+scripts/build-apk-local.cmd
+scripts/build-apk-wsl.sh
+scripts/build-apk-wsl-direct.sh
+scripts/ensure-release-keystore.sh
+scripts/inspect-relay-env.sh
+scripts/resign-apk-docker.sh
+scripts/CodeskHub.exe
+scripts/*.exe

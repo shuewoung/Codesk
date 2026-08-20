@@ -1,0 +1,85 @@
+{
+  "expo": {
+    "name": "Codesk",
+    "slug": "codesk",
+    "version": "1.0.7",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "scheme": "onedesk",
+    "platforms": ["ios", "android", "web"],
+    "extra": {
+      "eas": {
+        "projectId": "b4237233-f824-49de-b3e1-e49904313ab4"
+      },
+      "jpushAppKey": "364b4be1280291e3543d9bb8"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "icu.codesk.hub",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true,
+          "NSAllowsLocalNetworking": true
+        }
+      },
+      "config": {
+        "usesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "icu.codesk.hub",
+      "versionCode": 1,
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "softwareKeyboardLayoutMode": "pan",
+      "adaptiveIcon": {
+        "backgroundColor": "#0B0D10",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro",
+      "output": "single",
+      "name": "Codesk"
+    },
+    "plugins": [
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "扫描配对码或拍摄要发给 Codex 的照片",
+          "recordAudioAndroid": false,
+          "barcodeScannerEnabled": true
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "选择要发给 Codex 的图片",
+          "cameraPermission": "拍摄要发给 Codex 的照片"
+        }
+      ],
+      "./plugins/withCleartextNetwork.js",
+      [
+        "./plugins/withJPush.js",
+        {
+          "appKey": "364b4be1280291e3543d9bb8",
+          "channel": "developer-default"
+        }
+      ]
+    ]
+  }
+}

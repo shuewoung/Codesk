@@ -1,0 +1,41 @@
+{
+  "name": "codesk-mobile",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@expo/metro-runtime": "~6.1.2",
+    "expo": "~54.0.37",
+    "expo-camera": "~17.0.10",
+    "expo-clipboard": "~8.0.8",
+    "expo-constants": "~18.0.14",
+    "expo-crypto": "~15.0.9",
+    "expo-document-picker": "~14.0.8",
+    "expo-file-system": "~19.0.24",
+    "expo-image-picker": "~17.0.11",
+    "expo-secure-store": "~15.0.8",
+    "expo-status-bar": "~3.0.9",
+    "jcore-react-native": "^2.3.7",
+    "jpush-react-native": "^3.2.8",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-markdown-display": "^7.0.2",
+    "react-native-safe-area-context": "~5.6.0",
+    "react-native-web": "^0.21.0",
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "@types/react": "~19.1.10",
+    "tsx": "^4.23.12",
+    "typescript": "~5.9.2"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/protocol.test.ts src/history.test.ts src/api.test.ts src/discover.test.ts test/relay-client.test.ts"
+  },
+  "private": true
+}

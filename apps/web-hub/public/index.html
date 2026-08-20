@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Codesk</title>
+  <meta name="description" content="进了 ICU，还要遥控 Codex。本机已登录 Codex 的远程控制面。">
+  <link rel="canonical" href="https://codesk.icu/">
+  <meta property="og:title" content="Codesk">
+  <meta property="og:description" content="进了 ICU，还要遥控 Codex">
+  <meta property="og:image" content="https://codesk.icu/codesk-app.png">
+  
+  <!-- PWA Standalone App Config for iPad / iPhone / Android Fullscreen Mode -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Codesk">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#f3f4f6">
+
+  <link rel="icon" type="image/svg+xml" href="icons/codesk-app.svg?v=3.38.0">
+  <link rel="icon" type="image/png" sizes="512x512" href="favicon-512.png?v=3.38.0">
+  <link rel="icon" type="image/png" sizes="192x192" href="favicon-192.png?v=3.38.0">
+  <link rel="alternate icon" href="favicon.ico?v=3.38.0">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=3.38.0">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="vendor/nacl.min.js"></script>
+  <script src="e2e.js"></script>
+
+  <link rel="stylesheet" href="style.css?v=3.40.0">
+</head>
+<body>
+  <div id="auth-overlay" class="auth-overlay">
+    <div class="auth-card">
+      <img class="auth-mark" src="icons/codesk-app.png?v=3.38.0" alt="">
+      <h1>Codesk</h1>
+      <p id="auth-lead">家里码和出门码不是同一个。看电脑主机台：左家里，右出门。</p>
+      <div id="auth-offline" class="auth-offline hidden">
+        <strong>主机离线</strong>
+        <p>电脑休眠或 Hub 未运行时不能干活。没有离线队列。</p>
+      </div>
+      <form id="auth-login-form" class="auth-form auth-block hidden">
+        <strong>家里 WiFi</strong>
+        <p class="auth-hint">用主机台左边的常驻家里码。同一局域网，不经中继。</p>
+        <label for="auth-password">家里码</label>
+        <input id="auth-password" type="text" autocomplete="one-time-code" placeholder="主机台左边那个码">
+        <label for="auth-lan-url">电脑地址</label>
+        <div class="auth-lan-row">
+          <input id="auth-lan-url" type="url" placeholder="http://192.168.1.8:18990" autocomplete="off">
+          <button type="button" id="btn-probe-lan" class="btn">探测</button>
+        </div>
+        <button type="submit" class="btn btn-primary">连接家里</button>
+      </form>
+      <form id="auth-pair-form" class="auth-form auth-block hidden">
+        <strong>出门</strong>
+        <p class="auth-hint">用主机台右边的一次性出门码，或扫右边的二维码。</p>
+        <label for="auth-pair-code">出门码</label>
+        <input id="auth-pair-code" type="text" autocomplete="one-time-code" placeholder="主机台右边那个码">
+        <button type="submit" class="btn btn-primary">连接出门</button>
+      </form>
+      <p id="auth-error" class="auth-error hidden"></p>
+      <div class="auth-actions">
+        <button type="button" id="btn-auth-retry" class="btn">重试连接</button>
+        <button type="button" id="btn-auth-logout" class="btn hidden">退出</button>
+      </div>
+      <p class="auth-hint auth-links">
+        <a href="https://codesk.icu" target="_blank" rel="noreferrer">codesk.icu</a>
+        ·
+        <a href="https://github.com/shuewoung/codesk" target="_blank" rel="noreferrer">GitHub</a>
+      </p>
+    </div>
+  </div>
+  <div id="sidebar-overlay" class="sidebar-overlay"></div>
+  <div id="right-panel-overlay" class="right-panel-overlay"></div>
+
+  <!-- In-thread Search Overlay -->
+  <div id="search-overlay" class="search-overlay hidden">
+    <div class="search-panel">
+      <div class="search-input-row">
+        <span class="search-icon">🔍</span>
+        <input id="search-input" type="text" placeholder="搜索当前会话（含更早历史）..." autocomplete="off">
+        <button id="btn-close-search" class="icon-btn" title="关闭">✕</button>
+      </div>
+      <div id="search-results" class="search-results">
+        <div class="search-hint">输入关键词，回车搜索。覆盖会话全部历史，不止已加载部分。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Gesture Toast -->
+  <div id="gesture-toast" class="gesture-toast hidden"></div>
+  <div class="app-container">
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-brand">
+        <img class="brand-mark" src="icons/codesk-app.png?v=3.38.0" alt="Codesk">
+        <span class="brand-name">Codesk</span>
+      </div>
+
+      <button class="btn-new-task" data-action="new-chat" data-cwd="" title="新建对话">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"></circle><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>
+        <span>新建对话</span>
+      </button>
+
+      <div class="sidebar-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input id="sidebar-filter" type="search" placeholder="搜索项目或对话" autocomplete="off">
+        <button id="btn-refresh" class="icon-btn" title="刷新">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+        </button>
+      </div>
+
+      <section class="sidebar-section sidebar-section-threads">
+          <div id="thread-list" class="thread-list">
+          <div class="sidebar-empty">请先登录</div>
+        </div>
+      </section>
+    </aside>
+
+    <div class="workspace">
+    <header class="header">
+      <div class="header-left">
+        <button id="btn-toggle-sidebar" class="icon-btn mobile-only" aria-label="展开侧边栏">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+        </button>
+        <div class="logo">
+          <img class="header-mark" src="icons/codesk-app.png?v=3.38.0" alt="">
+        </div>
+        <h3 id="active-session-title" class="header-title">新对话</h3>
+        <div id="active-session-badge" class="session-status-badge badge-idle" title="已就绪">
+          <span class="badge-full">已就绪</span>
+          <span class="badge-short">已就绪</span>
+        </div>
+      </div>
+      <div class="header-right">
+        <a id="btn-open-host" class="header-link hidden" href="/host">主机台</a>
+        <button type="button" id="btn-show-pair-qr" class="icon-btn" title="手机扫码配对">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><path d="M14 14h3v3h-3z"></path><path d="M20 14v7h-7"></path></svg>
+        </button>
+        <button id="btn-open-search" class="icon-btn" title="在当前会话内搜索">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        </button>
+        <button type="button" id="connection-status" class="status-pill status-disconnected" title="连接断开" aria-label="连接断开">
+          <span class="status-dot"></span>
+          <span class="status-text">连接断开</span>
+        </button>
+        <button id="btn-toggle-workspace-panel" class="icon-btn mobile-only" aria-label="展开工作区">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="main-layout">
+
+      <!-- Chat / Stream Container -->
+      <main class="chat-container">
+        <!-- Active Session Banner -->
+        <div id="active-session-header" class="active-session-header" hidden></div>
+
+        <!-- Chat Feed Stream (Codex Natural Text Flow) -->
+        <div id="chat-feed" class="chat-feed">
+          <div class="empty-state">
+            <div class="empty-icon">
+              <img src="icons/codesk-app.png?v=3.38.0" alt="">
+            </div>
+            <h2>新对话</h2>
+            <p>输入指令开始。标题会在首轮对话后自动生成，也可双击侧栏会话重命名。</p>
+          </div>
+        </div>
+
+        <!-- Approval Banner Alert (Hidden by default) -->
+        <div id="approval-alert" class="approval-alert hidden">
+          <div class="approval-alert-header">
+            <span class="approval-icon">🛡️</span>
+            <strong>需要权限审批 (Waiting for Approval)</strong>
+          </div>
+          <div id="approval-detail" class="approval-detail">
+            命令或文件修改需要您的审批。
+          </div>
+          <div class="approval-actions">
+            <button id="btn-approve-allow" class="btn btn-primary">允许 / 批准</button>
+            <button id="btn-approve-session" class="btn">本会话始终允许</button>
+            <button id="btn-approve-deny" class="btn btn-danger">拒绝 / 否决</button>
+          </div>
+        </div>
+
+        <!-- Codex Desktop Parity Floating Step Capsule -->
+        <div id="floating-status-area" class="floating-status-area">
+          <div id="floating-capsule-badge" class="floating-capsule-badge hidden">
+            <span class="step-spinner">↻</span>
+            <span id="step-counter-text" class="capsule-step-text">第 1 / 1 步</span>
+          </div>
+        </div>
+
+        <!-- Input Control Panel (Exact Codex Desktop App Parity Input Card) -->
+        <div class="control-panel">
+          <div class="input-card">
+            <div id="attachment-chips" class="attachment-chips hidden"></div>
+            <div class="composer-pop-wrap slash-wrap">
+              <textarea id="msg-input" placeholder="随心输入，或键入 /" rows="2"></textarea>
+              <div id="slash-menu" class="slash-menu hidden"></div>
+            </div>
+            <input id="file-picker" type="file" multiple hidden>
+            
+            <div class="input-bottom-bar">
+              <!-- Left Toolbar (Add file + Access Mode) -->
+              <div class="input-toolbar-left">
+                <button id="btn-add-file" class="toolbar-btn" title="添加文件上下文">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                </button>
+                <button type="button" id="btn-slash" class="toolbar-btn" title="斜杠命令">/</button>
+                <div class="composer-pop-wrap">
+                  <button type="button" id="btn-skill" class="toolbar-btn toolbar-chip-btn" title="添加 Skill">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                    <span>Skill</span>
+                  </button>
+                  <div id="skill-popup" class="composer-popup hidden">
+                    <div class="composer-popup-head">
+                      <input id="skill-search" type="search" placeholder="搜索 Skill" autocomplete="off">
+                      <button type="button" id="btn-skill-manage" class="icon-btn" title="管理启用">⚙</button>
+                    </div>
+                    <div id="skill-list" class="composer-popup-list">
+                      <div class="composer-popup-hint">打开后加载</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="composer-pop-wrap">
+                  <button type="button" id="btn-mcp" class="toolbar-btn toolbar-chip-btn" title="MCP 服务器">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4"></path><path d="M12 18v4"></path><path d="M4.93 4.93l2.83 2.83"></path><path d="M16.24 16.24l2.83 2.83"></path><path d="M2 12h4"></path><path d="M18 12h4"></path><path d="M4.93 19.07l2.83-2.83"></path><path d="M16.24 7.76l2.83-2.83"></path></svg>
+                    <span id="mcp-btn-label">MCP</span>
+                  </button>
+                  <div id="mcp-popup" class="composer-popup hidden">
+                    <div class="composer-popup-head">
+                      <span>MCP 服务器</span>
+                      <button type="button" id="btn-mcp-reload" class="icon-btn" title="重新加载">↻</button>
+                    </div>
+                    <div id="mcp-list" class="composer-popup-list">
+                      <div class="composer-popup-hint">打开后加载</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="access-mode-wrap">
+                  <button type="button" id="access-mode-badge" class="access-mode-badge mode-full" title="访问权限">
+                    <span id="access-icon" class="access-icon">!</span>
+                    <span id="access-mode-text" class="access-text">完全访问</span>
+                  </button>
+                  <div id="access-popup-menu" class="access-popup-menu hidden">
+                    <div class="access-popup-head">
+                      <span>应如何批准 ChatGPT 操作？</span>
+                    </div>
+                    <button type="button" class="access-option" data-action="select-access" data-value="ask">
+                      <span class="access-option-icon">✋</span>
+                      <span class="access-option-body">
+                        <span class="access-option-title">请求批准</span>
+                        <span class="access-option-desc">编辑外部文件和使用互联网时始终询问</span>
+                      </span>
+                      <span class="access-option-check">✓</span>
+                    </button>
+                    <button type="button" class="access-option" data-action="select-access" data-value="auto">
+                      <span class="access-option-icon">🛡️</span>
+                      <span class="access-option-body">
+                        <span class="access-option-title">帮我批准</span>
+                        <span class="access-option-desc">仅对检测到的风险操作请求批准</span>
+                      </span>
+                      <span class="access-option-check">✓</span>
+                    </button>
+                    <button type="button" class="access-option" data-action="select-access" data-value="full">
+                      <span class="access-option-icon access-option-icon-warn">!</span>
+                      <span class="access-option-body">
+                        <span class="access-option-title">完全访问权限</span>
+                        <span class="access-option-desc">可不受限制地访问互联网和您电脑上的任何文件</span>
+                      </span>
+                      <span class="access-option-check">✓</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Right Toolbar (Model & Reasoning Popup Selector + Voice + Action Button) -->
+              <div class="input-toolbar-right" style="position: relative;">
+                
+                <!-- Model & Reasoning Trigger Badge (Codex Parity) -->
+                <div id="model-selector-badge" class="model-selector-badge">
+                  <span id="model-spinner" class="step-spinner hidden">↻</span>
+                  <span id="model-name-text">5.6 Sol</span>
+                  <span id="effort-text" class="effort-text-purple">极高</span>
+                  <span class="dropdown-arrow">∨</span>
+                </div>
+
+                <!-- 2-Tier Model & Reasoning Effort Popup Menu -->
+                <div id="model-popup-menu" class="model-popup-menu hidden">
+                  <div class="popup-item" data-menu="model">
+                    <span>模型</span>
+                    <span class="popup-value-group">
+                      <span id="popup-model-val">5.6 Sol</span>
+                      <span class="arrow-right">›</span>
+                    </span>
+                  </div>
+                  <div class="popup-item" data-menu="effort">
+                    <span>推理强度</span>
+                    <span class="popup-value-group">
+                      <span id="popup-effort-val">极高</span>
+                      <span class="arrow-right">›</span>
+                    </span>
+                  </div>
+                  <div class="popup-item" data-menu="speed">
+                    <span>速度</span>
+                    <span class="popup-value-group">
+                      <span>标准</span>
+                      <span class="arrow-right">›</span>
+                    </span>
+                  </div>
+                  <div class="popup-divider"></div>
+                  <div class="popup-item popup-advanced">
+                    <span>高级</span>
+                    <span class="arrow-up">∧</span>
+                  </div>
+                </div>
+
+                <!-- Level 2 Submenu Card (Models / Effort) -->
+                <div id="model-submenu-card" class="model-submenu-card hidden">
+                  <div class="submenu-title-bar">
+                    <button id="submenu-back-btn" class="submenu-back-btn" title="返回">‹</button>
+                    <span id="submenu-title-text">推理强度</span>
+                  </div>
+                  <div id="submenu-options-list" class="submenu-options-list">
+                    <!-- Dynamic Submenu Options -->
+                  </div>
+                </div>
+
+                <button id="btn-voice" class="toolbar-btn" title="语音输入">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+                </button>
+                <button id="btn-stop-turn" class="btn-circle-action btn-stop-turn hidden" title="停止当前 Turn">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"></rect></svg>
+                </button>
+                <button id="btn-main-action" class="btn-circle-action state-idle" title="发送消息">
+                  <svg class="icon-send" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- Right Panel (Official Codex Desktop Parity Workspace Explorer & Subagents Panel) -->
+      <aside id="right-panel" class="right-panel">
+        <div class="right-panel-sheet-handle" aria-hidden="true"></div>
+        <div class="right-panel-sheet-bar">
+          <span>工作区</span>
+          <button type="button" id="btn-close-right-panel" class="icon-btn" aria-label="关闭工作区">✕</button>
+        </div>
+
+        <nav class="right-panel-tabs" role="tablist" aria-label="工作区面板导航">
+          <button type="button" class="right-tab-btn active" data-tab="files" role="tab" aria-selected="true">📁 文件</button>
+          <button type="button" class="right-tab-btn" data-tab="git" role="tab" aria-selected="false">🌿 Git & 终端</button>
+          <button type="button" class="right-tab-btn" data-tab="subagents" role="tab" aria-selected="false">🤖 智能体</button>
+          <button type="button" class="right-tab-btn" data-tab="usage" role="tab" aria-selected="false">📊 用量</button>
+        </nav>
+
+        <!-- Tab 1: Project Files Pane -->
+        <div id="tab-pane-files" class="right-tab-pane">
+          <div class="right-panel-card workspace-tree-card">
+            <div class="card-header">
+              <span id="workspace-folder-name">📁 项目文件</span>
+              <button id="btn-refresh-workspace" class="btn-icon-sm" title="刷新文件树">↻</button>
+            </div>
+            <div class="workspace-search-box">
+              <input type="text" id="workspace-file-search" placeholder="🔍 筛选文件..." />
+            </div>
+            <div id="workspace-tree-body" class="workspace-tree-body">
+              <span class="placeholder-text">选择会话即可载入项目文件树</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 2: Git & Command Pane -->
+        <div id="tab-pane-git" class="right-tab-pane hidden">
+          <div class="right-panel-card">
+            <div class="card-header">
+              <span>Git 状态</span>
+              <button type="button" id="btn-git-refresh" class="btn-icon-sm" title="刷新 Git">↻</button>
+            </div>
+            <pre id="git-panel" class="panel-pre">打开会话后显示 git status</pre>
+          </div>
+          <div class="right-panel-card">
+            <div class="card-header">
+              <span>运行命令</span>
+            </div>
+            <div class="cmd-row">
+              <input type="text" id="cmd-input" placeholder="在会话目录跑一条命令" />
+              <button type="button" id="btn-run-cmd" class="btn-icon-sm" title="运行">▶</button>
+            </div>
+            <pre id="cmd-panel" class="panel-pre">输出会显示在这里</pre>
+          </div>
+        </div>
+
+        <!-- Tab 3: Subagents Pane -->
+        <div id="tab-pane-subagents" class="right-tab-pane hidden">
+          <div class="right-panel-card">
+            <div class="card-header">
+              <span>子智能体</span>
+            </div>
+            <div class="card-body" id="subagent-list">
+              <span class="subagent-status-tag">没有运行中的子智能体</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 4: Usage & Rate Limits Pane -->
+        <div id="tab-pane-usage" class="right-tab-pane hidden">
+          <div class="token-gauge-widget" title="账号限额与上下文 Token 用量统计">
+            <!-- Account Rate Limit Usage & Remaining Quota Card -->
+            <div class="account-rate-limit-card">
+              <div class="account-limit-header">
+                <span class="limit-plan-tag" id="quota-plan-tag">Codex Plus</span>
+                <span class="limit-reset-tag" id="quota-reset-text">重置: --</span>
+              </div>
+              <div class="limit-item">
+                <div class="limit-label-row">
+                  <span class="limit-label-title">账号限额</span>
+                  <span class="limit-val-text" id="quota-percent-text">剩余 --%</span>
+                </div>
+                <div class="limit-bar-track">
+                  <div class="limit-bar-fill" id="quota-bar-fill" style="width: 0%;"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="gauge-ring-divider"></div>
+
+            <!-- Context Window Token Horizontal Bar -->
+            <div class="account-rate-limit-card">
+              <div class="limit-item">
+                <div class="limit-label-row">
+                  <span class="limit-label-title">上下文</span>
+                  <span class="limit-val-text" id="gauge-percent-text">剩余 --%</span>
+                </div>
+                <div class="limit-bar-track">
+                  <div class="limit-bar-fill context-bar-fill" id="gauge-bar-fill" style="width: 0%;"></div>
+                </div>
+                <div class="gauge-sub-text" id="gauge-detail-text">待同步</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+    </div>
+  </div>
+
+  <!-- Modal File Preview Dialog -->
+  <div id="file-modal" class="file-modal hidden">
+    <div class="file-modal-content">
+      <div class="file-modal-header">
+        <div class="file-title-area">
+          <span class="file-icon">📄</span>
+          <span id="file-modal-name">文件预览</span>
+        </div>
+        <button type="button" id="btn-download-file" class="icon-btn" title="下载文件" aria-label="下载文件">↓</button>
+        <button id="btn-close-file-modal" class="icon-btn" aria-label="关闭预览">✕</button>
+      </div>
+      <div id="file-modal-path" class="file-modal-path">file:///...</div>
+      <div id="file-modal-body" class="file-modal-body markdown-body">
+        正在加载文件内容...
+      </div>
+    </div>
+  </div>
+
+  <div id="pair-qr-overlay" class="auth-overlay hidden">
+    <div class="auth-card pair-qr-card">
+      <h1>出门扫码</h1>
+      <p>扫这个码走中继连回这台电脑。这是一次性出门码，和主机台左边的家里码不是同一个。</p>
+      <div id="pair-qr-relay" class="pair-qr-relay">
+        <div id="pair-qr-relay-status" class="pair-qr-relay-status is-pending">正在检查中继…</div>
+        <div id="pair-qr-relay-url" class="pair-qr-relay-url"></div>
+      </div>
+      <div id="pair-qr-box" class="pair-qr-box"></div>
+      <div id="pair-qr-code" class="pair-qr-code"></div>
+      <p id="pair-qr-expire" class="auth-hint"></p>
+      <p id="pair-qr-error" class="auth-error hidden"></p>
+      <div class="auth-actions">
+        <button type="button" id="btn-refresh-pair-qr" class="btn btn-primary">刷新二维码</button>
+        <button type="button" id="btn-close-pair-qr" class="btn">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js?v=3.40.0"></script>
+</body>
+</html>

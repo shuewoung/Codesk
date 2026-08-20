@@ -1,0 +1,7 @@
+{
+  "version": "1.0.6",
+  "versionCode": 106,
+  "releaseDate": "2026-08-20",
+  "changelog": "1. 修复软键盘弹起高度适配，输入框贴合平滑\n2. 优化会话内 Diff 展开与即时文件搜索\n3. 优化多端协同与性能",
+  "downloadUrl": "https://codesk.icu/codesk-latest.apk"
+}

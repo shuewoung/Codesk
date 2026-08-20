@@ -1,0 +1,23 @@
+name = "codesk-www"
+main = "src/worker.js"
+compatibility_date = "2026-08-19"
+workers_dev = false
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+html_handling = "auto-trailing-slash"
+not_found_handling = "404-page"
+run_worker_first = true
+
+[[r2_buckets]]
+binding = "DOWNLOADS"
+bucket_name = "codesk-downloads"
+
+[[routes]]
+pattern = "codesk.icu"
+custom_domain = true
+
+[[routes]]
+pattern = "www.codesk.icu"
+custom_domain = true

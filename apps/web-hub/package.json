@@ -1,0 +1,16 @@
+{
+  "name": "codesk-hub",
+  "version": "1.0.0",
+  "description": "Codesk Hub: local Codex remote control surface",
+  "main": "server/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test server/auth.test.mjs server/turn-status.test.mjs"
+  },
+  "dependencies": {
+    "tweetnacl": "^1.0.3",
+    "web-push": "^3.6.7",
+    "ws": "^8.21.3"
+  }
+}

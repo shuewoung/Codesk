@@ -1,0 +1,17 @@
+{
+  "name": "codesk",
+  "private": true,
+  "type": "module",
+  "description": "进了 ICU，还要遥控 Codex",
+  "homepage": "https://codesk.icu",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shuewoung/codesk.git"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "express": "^5.2.1",
+    "playwright": "^1.62.1",
+    "ws": "^8.21.3"
+  }
+}

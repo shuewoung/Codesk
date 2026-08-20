@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" fill="none">
+  <rect width="1600" height="1000" fill="#141416"/>
+  <rect x="36" y="36" width="746" height="928" rx="28" fill="#F7F8FC"/>
+  <image href="codesk-app.png" x="318" y="220" width="180" height="180"/>
+  <text x="409" y="460" text-anchor="middle" fill="#12141A" font-family="Inter, Segoe UI, sans-serif" font-size="64" font-weight="700" letter-spacing="-0.05em">Codesk</text>
+  <text x="409" y="512" text-anchor="middle" fill="#4F6BFF" font-family="Inter, Noto Sans SC, sans-serif" font-size="24" font-weight="600">进了 ICU，还要遥控 Codex</text>
+  <text x="409" y="900" text-anchor="middle" fill="#8B909A" font-family="Inter, sans-serif" font-size="16">codesk.icu</text>
+
+  <rect x="818" y="36" width="746" height="448" rx="28" fill="#F7F8FC"/>
+  <text x="854" y="84" fill="#8B909A" font-family="Inter, sans-serif" font-size="13">PROMISE</text>
+  <text x="854" y="170" fill="#12141A" font-family="Inter, Noto Sans SC, sans-serif" font-size="42" font-weight="650">无缝流转</text>
+  <text x="854" y="228" fill="#5C6370" font-family="Inter, Noto Sans SC, sans-serif" font-size="22">同一份 session，桌面和手机来回切</text>
+  <text x="854" y="280" fill="#5C6370" font-family="Inter, Noto Sans SC, sans-serif" font-size="18">发 · 停 · 审批 · 不另开云</text>
+
+  <rect x="818" y="516" width="362" height="448" rx="28" fill="#1B1D22"/>
+  <circle cx="890" cy="620" r="28" fill="#D7C6FF"/>
+  <circle cx="960" cy="620" r="28" fill="#7B8CFF"/>
+  <circle cx="1030" cy="620" r="28" fill="#3B5BFF"/>
+  <text x="854" y="710" fill="#F7F8FC" font-family="Inter, sans-serif" font-size="18">#D7C6FF</text>
+  <text x="854" y="742" fill="#F7F8FC" font-family="Inter, sans-serif" font-size="18">#7B8CFF</text>
+  <text x="854" y="774" fill="#F7F8FC" font-family="Inter, sans-serif" font-size="18">#3B5BFF</text>
+  <text x="854" y="820" fill="#8B909A" font-family="Inter, Noto Sans SC, sans-serif" font-size="16">花瓣云 + 链条</text>
+
+  <rect x="1202" y="516" width="362" height="448" rx="28" fill="#F7F8FC"/>
+  <text x="1238" y="572" fill="#12141A" font-family="Inter, Noto Sans SC, sans-serif" font-size="22" font-weight="650">一人一机</text>
+  <text x="1238" y="640" fill="#12141A" font-family="Inter, Noto Sans SC, sans-serif" font-size="22" font-weight="650">中继只传话</text>
+  <text x="1238" y="708" fill="#12141A" font-family="Inter, Noto Sans SC, sans-serif" font-size="22" font-weight="650">凭据不离家</text>
+  <text x="1238" y="900" fill="#8B909A" font-family="Inter, sans-serif" font-size="14">codesk.icu</text>
+</svg>

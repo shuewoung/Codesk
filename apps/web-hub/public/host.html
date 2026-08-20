@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codesk 主机台</title>
+  <link rel="icon" type="image/png" href="icons/codesk-app.png">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <style>
+    :root {
+      --bg:#f7f8fc; --ink:#12141a; --muted:#5c6370; --line:#e6e8ee; --card:#fff;
+      --accent:#4f6bff; --accent-soft:#f5f7ff; --danger:#c43c3c; --ok:#18794e;
+      --okbg:#e8f6ee; --badbg:#fdecec; --shadow:0 18px 50px rgba(18,20,26,.06);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin:0; min-height:100%; }
+    body {
+      font-family: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+      background: var(--bg); color: var(--ink);
+    }
+    body::before {
+      content:"";
+      position:fixed; left:50%; top:-120px; width:820px; height:420px;
+      transform:translateX(-50%);
+      background:radial-gradient(closest-side, rgba(123,140,255,.28), rgba(59,91,255,.08) 55%, transparent 72%);
+      pointer-events:none;
+    }
+    main { width:min(980px, calc(100% - 36px)); margin:0 auto; padding:32px 0 56px; position:relative; }
+    .topbar { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:8px; }
+    .brand { display:flex; align-items:center; gap:12px; min-width:0; }
+    .brand img { width:44px; height:44px; border-radius:14px; box-shadow:0 8px 20px rgba(79,107,255,.22); }
+    .brand h1 { margin:0; font-size:28px; letter-spacing:-.045em; line-height:1.1; }
+    .slogan { margin:4px 0 0; color:var(--accent); font-size:13px; font-weight:600; letter-spacing:-.02em; }
+    .lead { color:var(--muted); margin:0 0 22px; line-height:1.6; max-width:42em; }
+    .split { display:grid; gap:16px; grid-template-columns:1fr; }
+    @media (min-width: 860px) { .split { grid-template-columns:1fr 1fr; } }
+    article {
+      background:var(--card); border:1px solid var(--line); border-radius:22px;
+      padding:22px; box-shadow:var(--shadow);
+    }
+    .card-lan { background:linear-gradient(180deg, #fff 0%, #fbfcff 100%); }
+    .card-out { background:linear-gradient(180deg, #fff 0%, #f7f8ff 100%); }
+    .card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+    h2 { margin:0 0 4px; font-size:18px; letter-spacing:-.03em; }
+    .hint { color:var(--muted); font-size:13px; line-height:1.55; margin:0 0 14px; }
+    .meta { color:var(--muted); font-size:13px; line-height:1.55; }
+    .pill { display:inline-flex; align-items:center; gap:6px; min-height:26px; padding:0 10px; border-radius:999px; font-size:12px; font-weight:600; background:#eef0f5; color:var(--muted); }
+    .pill::before { content:""; width:8px; height:8px; border-radius:50%; background:#c5c9d3; }
+    .pill.on { background:var(--okbg); color:var(--ok); }
+    .pill.on::before { background:#22a06b; }
+    .pill.off { background:var(--badbg); color:var(--danger); }
+    .pill.off::before { background:var(--danger); }
+    .tag { font-size:11px; font-weight:700; letter-spacing:.08em; color:var(--muted); text-transform:uppercase; }
+    .code {
+      font-family: Consolas, ui-monospace, monospace; font-size:30px; letter-spacing:.18em; font-weight:700;
+      margin:8px 0 2px; cursor:pointer; user-select:all;
+    }
+    .code:hover { color:var(--accent); }
+    .qr-wrap { display:grid; place-items:center; margin:14px 0 8px; }
+    .qr {
+      width:196px; height:196px; display:grid; place-items:center;
+      background:#fff; border:1px solid var(--line); border-radius:24px;
+      box-shadow:0 10px 28px rgba(18,20,26,.05);
+    }
+    .qr img, .qr canvas { border-radius:12px; }
+    .urls { display:grid; gap:6px; margin:10px 0 0; }
+    .url { display:flex; justify-content:space-between; gap:10px; align-items:center; padding:9px 12px; border:1px solid var(--line); border-radius:12px; font-size:13px; word-break:break-all; background:#fff; }
+    .url.main { border-color:#c9d2ff; background:var(--accent-soft); }
+    .url .mark { flex:0 0 auto; font-size:11px; font-weight:700; color:var(--accent); }
+    .more { margin-top:8px; }
+    .more summary { cursor:pointer; color:var(--muted); font-size:12px; }
+    .row { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:12px 0; border-top:1px solid var(--line); }
+    .row:first-of-type { border-top:0; }
+    button, .btn {
+      border:0; border-radius:999px; min-height:36px; padding:0 14px; font-weight:600; cursor:pointer;
+      font-family:inherit; text-decoration:none; display:inline-flex; align-items:center; justify-content:center;
+    }
+    .primary { background:var(--accent); color:#fff; box-shadow:0 8px 18px rgba(79,107,255,.25); }
+    .primary:hover { filter:brightness(1.05); }
+    .ghost { background:#fff; color:var(--ink); border:1px solid var(--line); }
+    .danger { background:#fff; color:var(--danger); border:1px solid #f0c8c8; }
+    .err { color:var(--danger); font-size:13px; min-height:1.2em; }
+    .dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:6px; background:#22a06b; }
+    .dot.off { background:#c5c9d3; }
+    .clients { margin-top:16px; }
+    footer {
+      margin-top:22px; display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px;
+      color:#8b919c; font-size:13px;
+    }
+    footer a { color:#5c6370; text-decoration:none; font-weight:600; }
+    footer a:hover { color:var(--accent); }
+    footer .sep { color:#c5c9d3; }
+    #btn-quit {
+      margin-left:auto; min-height:32px; padding:0 12px; background:transparent;
+      color:#8b919c; border:0; font-weight:600;
+    }
+    #btn-quit:hover { color:var(--danger); }
+    .hub { margin-top:8px; color:#8b919c; font-size:12px; word-break:break-all; width:100%; }
+    .toast {
+      position:fixed; left:50%; bottom:28px; transform:translateX(-50%) translateY(12px);
+      background:#12141a; color:#fff; padding:8px 14px; border-radius:999px; font-size:13px; font-weight:600;
+      opacity:0; pointer-events:none; transition:opacity .18s ease, transform .18s ease; z-index:9;
+    }
+    .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="topbar">
+      <div class="brand">
+        <img src="icons/codesk-app.png" alt="">
+        <div>
+          <h1>主机台</h1>
+          <p class="slogan">进了 ICU，还要遥控 Codex</p>
+        </div>
+      </div>
+      <a class="btn primary" href="/">打开本地 Codex</a>
+    </div>
+    <p class="lead">家里码和出门码不是同一个。同一 WiFi 用左边的家里码；出门扫右边的一次性码。</p>
+    <div class="split">
+      <article class="card-lan">
+        <div class="card-head">
+          <div>
+            <h2>家里 WiFi</h2>
+            <p class="hint">常驻码。手机和电脑在同一个局域网时用这个，不经过中继。</p>
+          </div>
+        </div>
+        <div class="tag">家里码 · 点击复制</div>
+        <div id="lan-code" class="code">……</div>
+        <div class="qr-wrap"><div id="lan-qr" class="qr"></div></div>
+        <div id="lan-main" class="meta"></div>
+        <div id="lan-urls" class="urls"></div>
+      </article>
+      <article class="card-out">
+        <div class="card-head">
+          <div>
+            <h2>出门</h2>
+            <p class="hint">一次性码，扫码后连回这台电脑。中继没连上就出不了这个码。</p>
+          </div>
+          <div id="relay-pill" class="pill">正在检查中继…</div>
+        </div>
+        <div id="relay-url" class="meta"></div>
+        <div class="tag" style="margin-top:12px">出门码 · 点击复制</div>
+        <div id="pair-code" class="code">——</div>
+        <div class="qr-wrap"><div id="pair-qr" class="qr"></div></div>
+        <div id="pair-expire" class="meta"></div>
+        <div id="pair-err" class="err"></div>
+        <p><button class="primary" id="btn-qr">刷新出门码</button></p>
+      </article>
+    </div>
+    <article class="clients">
+      <h2>已连接客户端</h2>
+      <div id="counts" class="meta">—</div>
+      <div id="clients"></div>
+    </article>
+    <footer>
+      <a href="https://github.com/shuewoung/codesk" target="_blank" rel="noreferrer">GitHub</a>
+      <span class="sep">·</span>
+      <a href="https://xhslink.cn/m/5XLlWCxJpDx" target="_blank" rel="noreferrer">小红书</a>
+      <span class="sep">·</span>
+      <a href="https://codesk.icu" target="_blank" rel="noreferrer">codesk.icu</a>
+      <button type="button" id="btn-quit">退出 Hub</button>
+      <div id="hub-id" class="hub"></div>
+    </footer>
+  </main>
+  <div id="toast" class="toast">已复制</div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    async function readJson(res) {
+      try { return await res.json(); } catch { return null; }
+    }
+    function hostOf(url) {
+      try { return new URL(url).host; } catch { return String(url || ''); }
+    }
+    function rankUrl(url) {
+      const host = hostOf(url);
+      if (host.startsWith('192.168.')) return 0;
+      if (/^10\./.test(host)) return 1;
+      if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return 2;
+      if (host.startsWith('169.254.')) return 9;
+      return 3;
+    }
+    function splitUrls(urls) {
+      const list = (urls || []).slice().sort((a, b) => rankUrl(a) - rankUrl(b) || a.localeCompare(b));
+      const usable = list.filter((u) => rankUrl(u) < 9);
+      return { main: usable[0] || '', rest: usable.slice(1), skipped: list.filter((u) => rankUrl(u) >= 9) };
+    }
+    function relayHttp(raw) {
+      const text = String(raw || '').trim();
+      if (!text) return '';
+      if (text.startsWith('wss://')) return ('https://' + text.slice(6)).replace(/\/$/, '');
+      if (text.startsWith('ws://')) return ('http://' + text.slice(5)).replace(/\/$/, '');
+      return text.replace(/\/$/, '');
+    }
+    function toast(text) {
+      const el = $('toast');
+      el.textContent = text;
+      el.classList.add('show');
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => el.classList.remove('show'), 1400);
+    }
+    function copyText(text) {
+      const value = String(text || '').trim();
+      if (!value || value === '……' || value === '——') return;
+      navigator.clipboard.writeText(value).then(() => toast('已复制'), () => {});
+    }
+    function setRelayPill(relay, pairUrl) {
+      const el = $('relay-pill');
+      el.classList.remove('on', 'off');
+      if (!relay || !relay.configured) {
+        el.classList.add('off');
+        el.textContent = '中继未配置';
+      } else if (relay.online) {
+        el.classList.add('on');
+        el.textContent = '中继已连接';
+      } else {
+        el.classList.add('off');
+        el.textContent = '中继未连接';
+      }
+      let url = relayHttp(relay && relay.url);
+      if (!url && pairUrl) {
+        try { url = new URL(pairUrl).origin; } catch { /* ignore */ }
+      }
+      $('relay-url').textContent = url ? ('中继地址 ' + url) : '';
+    }
+    function renderQr(id, url) {
+      const box = $(id);
+      box.innerHTML = '';
+      if (!url || typeof QRCode !== 'function') return;
+      new QRCode(box, { text: url, width: 168, height: 168, correctLevel: QRCode.CorrectLevel.M });
+    }
+    function renderLanUrls(urls) {
+      const { main, rest, skipped } = splitUrls(urls);
+      $('lan-main').textContent = main ? '扫上面的码，或在同一 WiFi 打开这个地址。' : '没有可用的局域网地址。';
+      renderQr('lan-qr', main);
+      const rows = [];
+      if (main) rows.push('<div class="url main"><span>' + main + '</span><span class="mark">常用</span></div>');
+      for (const url of rest) rows.push('<div class="url"><span>' + url + '</span></div>');
+      let html = rows.join('');
+      if (skipped.length) {
+        html += '<details class="more"><summary>已忽略 ' + skipped.length + ' 个链路本地地址</summary><div class="urls" style="margin-top:8px">'
+          + skipped.map((url) => '<div class="url"><span>' + url + '</span></div>').join('')
+          + '</div></details>';
+      }
+      $('lan-urls').innerHTML = html || '<div class="meta">没有网卡地址</div>';
+    }
+    async function loadStatus() {
+      const res = await fetch('/api/host/status');
+      const json = await readJson(res);
+      if (!res.ok || !json || !json.success) {
+        $('lan-main').textContent = (json && json.error) || '打不开主机台。请在这台电脑上打开。';
+        return;
+      }
+      if (json.lanCode) $('lan-code').textContent = json.lanCode;
+      $('hub-id').textContent = json.hubId ? ('Hub ' + json.hubId) : '';
+      renderLanUrls(json.lanUrls || []);
+      setRelayPill(json.relay);
+    }
+    async function loadPair() {
+      $('pair-err').textContent = '';
+      const res = await fetch('/api/host/pair-code');
+      const json = await readJson(res);
+      if (json && json.relay) setRelayPill(json.relay, json.pairUrl);
+      if (!res.ok || !json || !json.code) {
+        $('pair-code').textContent = '——';
+        $('pair-qr').innerHTML = '';
+        $('pair-expire').textContent = '';
+        $('pair-err').textContent = (json && (json.error || json.message)) || '中继未连接，出不了出门码';
+        return;
+      }
+      $('pair-code').textContent = json.code;
+      $('pair-expire').textContent = json.expiresAtMs ? ('有效至 ' + new Date(json.expiresAtMs).toLocaleTimeString() + ' · 一次性，扫过即废') : '一次性，扫过即废';
+      renderQr('pair-qr', json.pairUrl);
+    }
+    function line(item) {
+      const online = item.online ? '<span class="dot"></span>在线' : '<span class="dot off"></span>离线';
+      const title = item.kind === 'lan' ? ('家里 ' + (item.ip || item.id.slice(0, 8))) : ('出门 ' + item.id.slice(0, 8));
+      const sub = item.lastSeenAt ? new Date(item.lastSeenAt).toLocaleString() : (item.connectedAt ? new Date(item.connectedAt).toLocaleString() : '');
+      return '<div class="row"><div><div>' + title + '</div><div class="meta">' + online + (sub ? ' · ' + sub : '') + '</div></div><button class="danger" data-kind="' + item.kind + '" data-id="' + item.id + '">踢掉</button></div>';
+    }
+    async function loadClients() {
+      const res = await fetch('/api/host/clients');
+      const json = await readJson(res);
+      if (!res.ok || !json || !json.success) {
+        $('counts').textContent = (json && json.error) || '读不到客户端';
+        return;
+      }
+      const lan = json.lan || [];
+      const devices = json.devices || [];
+      $('counts').textContent = '家里 ' + lan.length + ' · 出门 ' + devices.length;
+      $('clients').innerHTML = lan.concat(devices).map(line).join('') || '<div class="meta">还没有客户端</div>';
+    }
+    $('lan-code').addEventListener('click', () => copyText($('lan-code').textContent));
+    $('pair-code').addEventListener('click', () => copyText($('pair-code').textContent));
+    $('btn-qr').addEventListener('click', () => loadPair());
+    $('btn-quit').addEventListener('click', async () => {
+      if (!confirm('退出后手机连不上这台电脑。确定退出 Hub？')) return;
+      try { await fetch('/api/host/shutdown', { method: 'POST' }); } catch { /* ignore */ }
+      document.body.innerHTML = '<p class="lead" style="padding:48px;text-align:center">Hub 已退出</p>';
+    });
+    $('clients').addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('button[data-id]');
+      if (!btn) return;
+      const res = await fetch('/api/host/kick', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: btn.getAttribute('data-kind'), id: btn.getAttribute('data-id') })
+      });
+      const json = await readJson(res);
+      if (!res.ok) {
+        alert((json && json.error) || '踢出失败');
+        return;
+      }
+      loadClients();
+    });
+    loadStatus();
+    loadPair();
+    loadClients();
+    setInterval(() => { loadStatus(); loadClients(); }, 4000);
+  </script>
+</body>
+</html>

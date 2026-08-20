@@ -1,0 +1,19 @@
+{
+  "name": "codesk-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Codesk VPS relay: TLS, invite, pair, hub routing, payload forward",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "invite": "node bin/invite.mjs",
+    "test": "node --test test/relay.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
+}

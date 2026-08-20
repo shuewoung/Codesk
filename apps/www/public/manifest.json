@@ -1,0 +1,22 @@
+{
+  "name": "Codesk",
+  "short_name": "Codesk",
+  "description": "进了 ICU，还要遥控 Codex",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d0f15",
+  "theme_color": "#4f6bff",
+  "icons": [
+    {
+      "src": "/codesk-app.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/favicon-32.png",
+      "sizes": "32x32",
+      "type": "image/png"
+    }
+  ]
+}
