@@ -76,27 +76,19 @@ node server/index.js
 
 ## 📂 项目文件目录结构
 
+**前端 UI 单源目录（只维护这一个）**：`apps/web/`
+
 ```text
-06_web_app/
-├── README.md                  # 项目使用与安装说明文档
-├── TECHNICAL_ARCHITECTURE.md  # 详细技术架构与性能设计文档
-├── package.json               # Node.js 项目依赖配置
-├── package-lock.json          # 依赖版本锁文件
-├── start-remote-hub.cmd       # Windows 后台守护与一键启动脚本
-├── server/
-│   └── index.js               # Node.js 后端核心服务 (WebSocket + REST API + 日志流扫描)
-└── public/
-    ├── index.html             # 前端主页面 (包含 PWA 标签与 CDN 脚本)
-    ├── style.css              # 多端响应式与自适应黑金样式表
-    ├── app.js                 # 前端核心引擎 (双重缓存 + Safe DOM 防错 + 实时 WebSocket)
-    ├── sw.js                  # PWA Service Worker (App Shell 离线预缓存)
-    ├── manifest.json          # PWA 真原生 App 配置文件
-    ├── favicon.svg            # Codesk 主图标 (SVG)
-    ├── favicon.ico            # 传统 Favicon (16–64)
-    ├── favicon-192.png        # PWA 图标 (192x192)
-    ├── favicon-512.png        # PWA 高清图标 (512x512)
-    ├── apple-touch-icon.png   # iOS 主屏幕图标 (180x180)
-    └── icons/                 # 完整图标系统 (mark / lockup / brand board)
+apps/
+├── web/                       # ← 浏览器/PWA 多端一致版唯一维护目录
+│   ├── index.html
+│   ├── app.js
+│   ├── style.css
+│   └── ...
+└── web-hub/
+    ├── server/
+    │   └── index.js           # 后端（会自动优先加载 ../web 作为静态资源）
+    └── public/                # 过渡期副本（可删）
 ```
 
 ---

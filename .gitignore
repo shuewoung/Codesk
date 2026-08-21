@@ -18,8 +18,10 @@ node_modules/
 !apps/web-hub/public/*.png
 !apps/web-hub/public/icons/*.png
 !apps/mobile/assets/*.png
+!apps/www/public/*.png
 *.html
 !apps/web-hub/public/*.html
+!apps/www/public/*.html
 dom_*.html
 debug_*.js
 

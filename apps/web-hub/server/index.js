@@ -15,7 +15,8 @@ import { createAuth, corsHeaders, isLoopbackAddress, isPublicApi } from './auth.
 import { defaultDataDir, loadOrCreateIdentity, loadRelayConfig } from './identity.js';
 import { createRelayClient, pairLandingUrl } from './relay-client.js';
 import { spawnCommand, runGitReadonly } from './local-cmd.js';
-import { APPROVAL_TTL_MS, commandFromFunctionCall, inspectRolloutTail, snapshotParseState } from './turn-status.js';
+import { createGoalsStore } from './goals.js';
+import { APPROVAL_TTL_MS, commandFromFunctionCall, inspectRolloutTail, isNonUserThreadRecord, parseThreadSpawn, resolveLiveStatus, snapshotParseState, threadLooksLive } from './turn-status.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,11 +24,15 @@ const require = createRequire(import.meta.url);
 
 const PORT = Number(process.env.PORT) || 18990;
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+const goals = createGoalsStore(CODEX_HOME);
 function resolvePublicDir() {
   const candidates = [
+    // 单一维护目录（浏览器/PWA 多端一致版）
+    path.join(__dirname, '..', '..', 'web'),
     path.join(__dirname, '..', 'public'),
     path.join(path.dirname(process.execPath), 'public'),
     path.join(process.cwd(), 'public'),
+    path.join(process.cwd(), 'apps', 'web'),
   ];
   for (const dir of candidates) {
     if (fs.existsSync(path.join(dir, 'index.html'))) return dir;
@@ -47,18 +52,32 @@ const identity = loadOrCreateIdentity(DATA_DIR);
 const auth = createAuth({ dataDir: DATA_DIR, env: process.env, port: PORT });
 const liveCommands = new Map();
 const LAN_CODE_FILE = path.join(DATA_DIR, 'lan-code');
+const LAN_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+function randomLanCode() {
+  const bytes = crypto.randomBytes(4);
+  let out = '';
+  for (const b of bytes) out += LAN_CODE_ALPHABET[b % LAN_CODE_ALPHABET.length];
+  return out;
+}
+function normalizeLanCode(value) {
+  const next = String(value || '').replace(/^\uFEFF/, '').trim().toUpperCase();
+  return /^[0-9A-Z]{4}$/.test(next) ? next : '';
+}
+function persistLanCode(code) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(LAN_CODE_FILE, `${code}\n`, { encoding: 'utf-8', mode: 0o600 });
+  return code;
+}
 function loadLanCode() {
   try {
-    const existing = fs.readFileSync(LAN_CODE_FILE, 'utf8').replace(/^\uFEFF/, '').trim();
-    if (existing) return existing.toUpperCase();
+    const existing = normalizeLanCode(fs.readFileSync(LAN_CODE_FILE, 'utf8'));
+    if (existing) return existing;
   } catch {
     /* create */
   }
-  const next = crypto.randomBytes(3).toString('hex').toUpperCase();
-  fs.writeFileSync(LAN_CODE_FILE, `${next}\n`, { encoding: 'utf-8', mode: 0o600 });
-  return next;
+  return persistLanCode(randomLanCode());
 }
-const localLanCode = loadLanCode();
+let localLanCode = loadLanCode();
 
 console.log(`[Codex Remote Hub] CODEX_HOME: ${CODEX_HOME}`);
 console.log(`[Codex Remote Hub] hubId: ${identity.hubId}`);
@@ -244,6 +263,7 @@ let lastRolloutIndexBuildAt = 0;
 let threadMetaCache = new Map(); // threadId -> { title, cwd, isPinned, isArchived, updatedAtMs }
 const titleOverrideMap = new Map(); // threadId -> { name, upd } 手动重命名优先于旧索引
 let subagentThreadIds = new Set(); // threadId -> true（子智能体会话，app 列表不显示）
+let subagentParentById = new Map(); // childThreadId -> parentThreadId
 let lastThreadMetaStat = { mtimeMs: 0, size: 0, walMtimeMs: 0, walSize: 0 };
 let threadMetaLastCheck = 0;
 
@@ -304,13 +324,17 @@ function loadThreadMetaCache(force = false) {
       ).all();
       const next = new Map();
       const subagents = new Set();
+      const parents = new Map();
       for (const r of rows) {
         if (!r.id) continue;
         // 非 app 主会话一律不显示：
-        //  - thread_source='subagent'：delegation 子智能体
+        //  - thread_source='subagent' / guardian / thread_spawn JSON
         //  - source != 'vscode'：codex exec / CLI 自动化会话（如短剧工厂子任务），app 列表也不显示
-        if (r.thread_source === 'subagent' || (r.source && r.source !== 'vscode')) {
+        if (isNonUserThreadRecord(r.thread_source, r.source)) {
           subagents.add(r.id);
+          next.delete(r.id);
+          const spawn = parseThreadSpawn(r.source);
+          if (spawn && spawn.parentThreadId) parents.set(r.id, spawn.parentThreadId);
           continue;
         }
         // 同一 thread 可能多行（fork/更新），保留 updated_at_ms 最新的一条
@@ -325,8 +349,10 @@ function loadThreadMetaCache(force = false) {
           });
         }
       }
+      for (const id of subagents) next.delete(id);
       threadMetaCache = next;
       subagentThreadIds = subagents;
+      subagentParentById = parents;
     } finally {
       try { db.close(); } catch (e) {}
     }
@@ -511,27 +537,26 @@ function getActiveLockThreadIds() {
   }
 }
 
-function checkThreadIsActivelyWorking(threadId, rolloutInfo, activeLocks) {
-  const cached = threadId ? rolloutParseState.get(threadId) : null;
-  if (cached) {
-    try {
-      const stats = rolloutInfo && rolloutInfo.path && fs.existsSync(rolloutInfo.path)
-        ? fs.statSync(rolloutInfo.path)
-        : { size: cached.offset, mtimeMs: cached.mtimeMs };
-      const view = snapshotParseState(cached);
-      applyLockOverride(view, activeLocks, threadId, stats, rolloutInfo && rolloutInfo.path);
-      return view.status === 'working';
-    } catch {
-      return cached.status === 'working';
-    }
-  }
+function rolloutLooksLive(rolloutInfo) {
   if (!rolloutInfo || !rolloutInfo.path || !fs.existsSync(rolloutInfo.path)) return false;
   try {
     const stats = fs.statSync(rolloutInfo.path);
-    return inspectRolloutTail(rolloutInfo.path, stats).open;
+    return threadLooksLive(inspectRolloutTail(rolloutInfo.path, stats), stats);
   } catch {
     return false;
   }
+}
+
+function hasLiveChildAgents(threadId) {
+  if (!threadId || !subagentParentById || subagentParentById.size === 0) return false;
+  for (const [childId, parentId] of subagentParentById) {
+    if (parentId === threadId && rolloutLooksLive(rolloutCache.get(childId))) return true;
+  }
+  return false;
+}
+
+function checkThreadIsActivelyWorking(threadId, rolloutInfo) {
+  return rolloutLooksLive(rolloutInfo) || hasLiveChildAgents(threadId);
 }
 
 const DESKTOP_STATE_PATH = path.join(CODEX_HOME, '.codex-global-state.json');
@@ -578,10 +603,11 @@ function collectProjectRoots(project) {
   const raw = project && (project.rootPaths || project.sources || project.roots);
   if (!raw) return [];
   const list = Array.isArray(raw) ? raw : [raw];
-  return list.map((item) => {
-    if (!item) return '';
-    if (typeof item === 'string') return item;
-    return item.path || item.rootPath || item.root || '';
+  return list.map((item, i) => {
+    if (!item) return null;
+    const root = typeof item === 'string' ? item : (item.path || item.rootPath || item.root || '');
+    if (!root) return null;
+    return { root, primary: i === 0 };
   }).filter(Boolean);
 }
 
@@ -609,15 +635,15 @@ function loadDesktopProjectCatalog() {
         seen.add(project.name);
         orderNames.push(project.name);
       }
-      for (const root of collectProjectRoots(project)) {
-        roots.push({ root, name: project.name, id: projectId });
+      for (const item of collectProjectRoots(project)) {
+        roots.push({ root: item.root, name: project.name, id: projectId, primary: item.primary });
       }
     }
     for (const [id, project] of Object.entries(localProjects)) {
       if (!project || !project.name) continue;
       const projectId = project.id || id;
-      for (const root of collectProjectRoots(project)) {
-        roots.push({ root, name: project.name, id: projectId });
+      for (const item of collectProjectRoots(project)) {
+        roots.push({ root: item.root, name: project.name, id: projectId, primary: item.primary });
       }
     }
     desktopProjectCatalog = {
@@ -644,14 +670,17 @@ function resolveProject(cwd, catalog) {
   let best = '';
   let bestId = '';
   let bestLen = -1;
+  let bestPrimary = false;
   for (const item of roots) {
     const rootKey = normalizePathKey(item.root);
     if (!rootKey) continue;
     if (key === rootKey || key.startsWith(rootKey + '\\')) {
-      if (rootKey.length > bestLen) {
+      const primary = !!item.primary;
+      if (rootKey.length > bestLen || (rootKey.length === bestLen && primary && !bestPrimary)) {
         best = item.name;
         bestId = item.id || '';
         bestLen = rootKey.length;
+        bestPrimary = primary;
       }
     }
   }
@@ -683,7 +712,6 @@ function sortProjectsByDesktopOrder(projects, orderNames) {
 // 标题/元数据以 state_5.sqlite 的 threads 表为权威，rollout 文件头仅作 fallback
 function getThreadList() {
   const tStart = Date.now();
-  const activeLocks = getActiveLockThreadIds();
   const catalog = loadDesktopProjectCatalog();
 
   // 权威元数据缓存（state_5.sqlite，3 秒粒度）
@@ -731,13 +759,15 @@ function getThreadList() {
     if (!info || !info.path || !fs.existsSync(info.path)) continue;
     // 过滤子智能体会话（app 左侧列表不显示）
     if (subagentThreadIds.has(threadId)) continue;
+    const meta = threadMetaCache.get(threadId);
+    if (meta && meta.isArchived) continue;
     let mtimeMs = info.mtimeMs;
     try {
-      // 取实时 mtime：正在写入的会话需正确排序到顶部
       mtimeMs = fs.statSync(info.path).mtimeMs;
     } catch (e) {}
+    const sortMs = Number(meta && meta.updatedAtMs) || mtimeMs || 0;
 
-    const isActiveWorking = checkThreadIsActivelyWorking(threadId, info, activeLocks);
+    const isActiveWorking = checkThreadIsActivelyWorking(threadId, info);
     const live = liveApprovalState(threadId);
     let needsApproval = live.live === true;
     if (live.live == null) {
@@ -746,7 +776,6 @@ function getThreadList() {
     }
 
     // 元数据优先级：session_index thread_name（app 权威）→ sqlite title → rollout 首条用户消息 → 时间戳
-    const meta = threadMetaCache.get(threadId);
     const cwd = normCwd(meta && meta.cwd ? meta.cwd : (info.cwd || ''));
     const idx = titleMap.get(threadId);
     const override = titleOverrideMap.get(threadId);
@@ -763,9 +792,11 @@ function getThreadList() {
     rawThreads.push({
       id: threadId,
       title,
-      updatedAt: mtimeMs ? new Date(mtimeMs).toISOString() : new Date().toISOString(),
-      mtimeMs: mtimeMs || 0,
+      updatedAt: sortMs ? new Date(sortMs).toISOString() : new Date().toISOString(),
+      mtimeMs: sortMs,
       isActive: isActiveWorking,
+      working: isActiveWorking,
+      status: needsApproval ? 'waiting_approval' : (isActiveWorking ? 'working' : 'idle'),
       needsApproval,
       isPinned: pinnedThreadSet.has(threadId) || !!(meta && meta.isPinned),
       cwd,
@@ -776,6 +807,7 @@ function getThreadList() {
 
   rawThreads.sort((a, b) => {
     if (!!b.isPinned !== !!a.isPinned) return a.isPinned ? -1 : 1;
+    if (!!b.isActive !== !!a.isActive) return a.isActive ? 1 : -1;
     return (b.mtimeMs || 0) - (a.mtimeMs || 0);
   });
 
@@ -808,16 +840,17 @@ function getThreadList() {
     if (!info || !info.name) continue;
     const existing = projectMap.get(info.name);
     const roots = collectProjectRoots(info);
+    const primaryRoot = roots[0] && roots[0].root ? roots[0].root : '';
     if (existing) {
       existing.id = existing.id || projectId;
       existing.isPinned = true;
-      if (!existing.cwd && roots[0]) existing.cwd = roots[0];
+      if (!existing.cwd && primaryRoot) existing.cwd = primaryRoot;
       continue;
     }
     projectMap.set(info.name, {
       id: projectId,
       name: info.name,
-      cwd: roots[0] || '',
+      cwd: primaryRoot,
       isPinned: true,
       maxMtimeMs: 0,
       threads: []
@@ -922,6 +955,7 @@ function processRolloutLine(entry, state) {
     state.status = 'idle';
     state.pendingApproval = null;
     state.activeActionText = '';
+    if (state.openCalls) state.openCalls.clear();
     // 记录任务完成时间（rollout 行内 timestamp，如 2026-08-15T08:29:45.563Z）
     state.completedAt = entry.timestamp || payload.timestamp || null;
   } else if (payloadType === 'token_count') {
@@ -968,6 +1002,7 @@ function processRolloutLine(entry, state) {
         state.openCalls.set(callId, {
           id: String(payload.id || callId),
           callId,
+          name: payload.name || '',
           command: commandFromFunctionCall(payload),
         });
       }
@@ -1106,18 +1141,27 @@ function dropStaleParsedApproval(state, threadId, activeLocks) {
   const stale = live.live === false || isParsedApprovalClosed(threadId, state.pendingApproval);
   if (!stale) return;
   state.pendingApproval = null;
-  if (state.status === 'waiting_approval') {
-    state.status = activeLocks && activeLocks.has(threadId) ? 'working' : 'idle';
-  }
+  if (state.status === 'waiting_approval') state.status = 'idle';
 }
 
 function applyLockOverride(state, activeLocks, threadId, stats, filePath) {
   dropStaleParsedApproval(state, threadId, activeLocks);
   if (state.status === 'waiting_approval') return;
-  if (!activeLocks || !threadId || !activeLocks.has(threadId)) return;
-  if (filePath && stats && !inspectRolloutTail(filePath, stats).open) return;
-  state.status = 'working';
-  if (!state.activeActionText) state.activeActionText = '正在处理任务...';
+  const tail = filePath && stats ? inspectRolloutTail(filePath, stats) : { open: false };
+  const next = resolveLiveStatus(state.status, {
+    hasLiveChildren: hasLiveChildAgents(threadId),
+    tail,
+    stats,
+  });
+  if (next === 'working') {
+    state.status = 'working';
+    if (!state.activeActionText) state.activeActionText = '正在处理任务...';
+    return;
+  }
+  if (state.status === 'working') {
+    state.status = 'idle';
+    state.activeActionText = '';
+  }
 }
 
 const PLAN_TYPE_LABELS = {
@@ -1410,6 +1454,24 @@ function pickDefaultCwd() {
   return best ? best.cwd : os.homedir();
 }
 
+function ensureProjectCwd(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return pickDefaultCwd();
+  const resolved = path.isAbsolute(trimmed)
+    ? path.normalize(trimmed)
+    : path.resolve(path.dirname(pickDefaultCwd()), trimmed);
+  const { root } = path.parse(resolved);
+  if (!root || resolved === root) {
+    throw new Error('请填写具体项目目录，例如 D:\\projects\\my-app');
+  }
+  if (!fs.existsSync(resolved)) {
+    fs.mkdirSync(resolved, { recursive: true });
+  } else if (!fs.statSync(resolved).isDirectory()) {
+    throw new Error('该路径已存在，但不是文件夹');
+  }
+  return resolved;
+}
+
 function placeholderTitle(cwd) {
   const resolved = path.normalize(String(cwd || '').trim());
   if (!resolved || resolved === '.' || resolved === path.sep) return '/';
@@ -1589,9 +1651,14 @@ function searchThreadHistory(rolloutPath, q) {
   return results;
 }
 
+function isLoopbackIp(ip) {
+  const raw = String(ip || '').trim().toLowerCase();
+  const host = raw.replace(/^::ffff:/, '');
+  return host === '127.0.0.1' || host === '::1' || host === 'localhost' || /^127\./.test(host);
+}
+
 function isLoopbackReq(req) {
-  const ip = String(req.socket?.remoteAddress || '');
-  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+  return isLoopbackIp(req.socket?.remoteAddress || '');
 }
 
 function relayPublicState() {
@@ -1630,7 +1697,7 @@ function handleHostApi(req, res, reqUrl) {
       hubId: identity.hubId,
       port: PORT,
       relay: relayPublicState(),
-      lanCount: lanClients.size,
+      lanCount: [...lanClients.values()].filter((ws) => !isLoopbackIp(ws.clientIp)).length,
       password: auth.hostPassword || '',
       lanCode: localLanCode,
       lanUrls: listLanUrls(PORT),
@@ -1657,13 +1724,15 @@ function handleHostApi(req, res, reqUrl) {
   }
   if (reqUrl.pathname === '/api/host/clients' && req.method === 'GET') {
     (async () => {
-      const lan = [...lanClients.values()].map((ws) => ({
-        id: ws.clientId,
-        kind: 'lan',
-        ip: ws.clientIp || '',
-        connectedAt: ws.connectedAt || null,
-        online: ws.readyState === 1,
-      }));
+      const lan = [...lanClients.values()]
+        .filter((ws) => !isLoopbackIp(ws.clientIp))
+        .map((ws) => ({
+          id: ws.clientId,
+          kind: 'lan',
+          ip: ws.clientIp || '',
+          connectedAt: ws.connectedAt || null,
+          online: ws.readyState === 1,
+        }));
       let devices = [];
       try {
         const listed = await relay.listDevices();
@@ -1715,6 +1784,30 @@ function handleHostApi(req, res, reqUrl) {
   if (reqUrl.pathname === '/api/host/shutdown' && req.method === 'POST') {
     sendJson(req, res, 200, { success: true });
     setTimeout(() => process.exit(0), 200);
+    return;
+  }
+  if (reqUrl.pathname === '/api/host/lan-code' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+      if (body.length > 65536) req.destroy();
+    });
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body || '{}');
+        const wanted = String(parsed.code || parsed.lanCode || '').trim();
+        if (wanted) {
+          const next = normalizeLanCode(wanted);
+          if (!next) return sendJson(req, res, 400, { success: false, error: '家里码须为 4 位字母或数字' });
+          localLanCode = persistLanCode(next);
+          return sendJson(req, res, 200, { success: true, lanCode: localLanCode });
+        }
+        localLanCode = persistLanCode(randomLanCode());
+        return sendJson(req, res, 200, { success: true, lanCode: localLanCode });
+      } catch (err) {
+        return sendJson(req, res, 400, { success: false, error: err.message || '家里码没改成' });
+      }
+    });
     return;
   }
   return sendJson(req, res, 404, { success: false, error: 'unknown host api' });
@@ -1880,6 +1973,33 @@ const server = http.createServer((req, res) => {
         hubE2ePub: identity.e2ePub,
       });
     })();
+    return;
+  }
+
+  if (reqUrl.pathname === '/api/thread-goal' && req.method === 'GET') {
+    const threadId = String(reqUrl.searchParams.get('threadId') || '').trim();
+    if (!threadId) return sendJson(req, res, 400, { success: false, error: '缺少会话' });
+    return sendJson(req, res, 200, { success: true, threadId, goal: goals.getThreadGoal(threadId) });
+  }
+
+  if (reqUrl.pathname === '/api/thread-goal' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+      if (body.length > 1e6) req.destroy();
+    });
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body || '{}');
+        const threadId = String(parsed.threadId || '').trim();
+        if (!threadId) return sendJson(req, res, 400, { success: false, error: '缺少会话' });
+        const goal = goals.setThreadGoal(threadId, parsed.objective);
+        broadcastToClients({ type: 'goal_data', threadId, goal });
+        sendJson(req, res, 200, { success: true, threadId, goal });
+      } catch (e) {
+        sendJson(req, res, 400, { success: false, error: e.message });
+      }
+    });
     return;
   }
 
@@ -2136,6 +2256,26 @@ const server = http.createServer((req, res) => {
       return sendJson(req, res, 404, { success: false, error: `File not found on host disk: ${rawPath}` });
     }
 
+    const ext = path.extname(filePath).toLowerCase();
+    const isImg = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp'].includes(ext);
+
+    if (isImg) {
+      fs.readFile(filePath, (readErr, buffer) => {
+        if (readErr) {
+          return sendJson(req, res, 500, { success: false, error: `Error reading file: ${readErr.message}` });
+        }
+        sendJson(req, res, 200, {
+          success: true,
+          path: filePath,
+          fileName: path.basename(filePath),
+          ext,
+          encoding: 'base64',
+          content: buffer.toString('base64')
+        });
+      });
+      return;
+    }
+
     fs.readFile(filePath, 'utf-8', (readErr, content) => {
       if (readErr) {
         return sendJson(req, res, 500, { success: false, error: `Error reading file: ${readErr.message}` });
@@ -2144,7 +2284,8 @@ const server = http.createServer((req, res) => {
         success: true,
         path: filePath,
         fileName: path.basename(filePath),
-        ext: path.extname(filePath).toLowerCase(),
+        ext,
+        encoding: 'utf8',
         content
       });
     });
@@ -2210,18 +2351,17 @@ const server = http.createServer((req, res) => {
   }
 
   const ext = path.extname(resolved).toLowerCase();
-  let body = staticCache.get(resolved);
-  // html/css/js/sw 每次读盘，避免改主题后必须重启服务才生效
-  if (!body || ['.html', '.css', '.js', '.json', '.svg'].includes(ext)) {
+  let body = null;
+  // 静态前端文件总是从磁盘读取最新内容，确保修改 CSS/JS 后刷新页面实时生效（零缓存延迟）
+  if (['.html', '.css', '.js', '.json', '.svg', '.png', '.ico', '.jpg', '.webp'].includes(ext)) {
     try {
       body = fs.readFileSync(resolved);
       staticCache.set(resolved, body);
     } catch (e) {
-      if (!body) {
-        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-        return res.end('404 Not Found');
-      }
+      body = staticCache.get(resolved) || null;
     }
+  } else {
+    body = staticCache.get(resolved);
   }
   if (!body) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -2333,7 +2473,7 @@ function scheduleAppServerRefresh(threadId, force = false) {
 
 // 建会话：首选真实 app-server（有 writer，桌面/网页双向可见），失败降级手写 rollout
 async function createThreadSmart(targetCwd, title = '新聊天', opts = {}) {
-  const resolvedCwd = targetCwd || pickDefaultCwd();
+  const resolvedCwd = targetCwd ? ensureProjectCwd(targetCwd) : pickDefaultCwd();
   const nextTitle = resolveCreateTitle(resolvedCwd, title);
   try {
     const client = getCodex();
@@ -2484,6 +2624,21 @@ async function handleClientMessage(ws, msg) {
       updateCodexConfig(key, value);
       const configData = readCodexConfig();
       broadcastToClients({ type: 'config_data', data: configData });
+    }
+  }
+
+  else if (type === 'get_goal') {
+    if (!threadId) return;
+    ws.send(JSON.stringify({ type: 'goal_data', threadId, goal: goals.getThreadGoal(threadId) }));
+  }
+
+  else if (type === 'set_goal') {
+    try {
+      if (!threadId) throw new Error('缺少会话');
+      const goal = goals.setThreadGoal(threadId, msg.objective);
+      broadcastToClients({ type: 'goal_data', threadId, goal });
+    } catch (e) {
+      ws.send(JSON.stringify({ type: 'action_feedback', status: 'error', message: e.message || '无法保存目标' }));
     }
   }
 
@@ -2861,7 +3016,26 @@ const lastThreadBroadcast = new Map(); // threadId -> { size, mtimeMs, at }
 const lastPushedStatus = new Map();    // threadId -> 'working' | 'idle' | 'waiting_approval'
 let lastThreadListBroadcastAt = 0;
 
+function isHiddenThread(threadId) {
+  if (!threadId) return true;
+  if (subagentThreadIds.has(threadId)) return true;
+  try { loadThreadMetaCache(); } catch { /* ignore */ }
+  return subagentThreadIds.has(threadId);
+}
+
+function shouldNotifyThread(threadId) {
+  if (!threadId) return false;
+  try { loadThreadMetaCache(); } catch { /* ignore */ }
+  if (subagentThreadIds.has(threadId)) return false;
+  return threadMetaCache.has(threadId);
+}
+
 function pushThreadUpdate(threadId, force = false) {
+  if (isHiddenThread(threadId)) {
+    lastPushedStatus.delete(threadId);
+    lastThreadBroadcast.delete(threadId);
+    return;
+  }
   const info = rolloutCache.get(threadId);
   if (!info || !info.path) return;
 
@@ -2882,7 +3056,7 @@ function pushThreadUpdate(threadId, force = false) {
   // 状态跃迁检测 → Web Push（PWA 完全关闭也能收到）
   const prevStatus = lastPushedStatus.get(threadId);
   const newStatus = history.status;
-  if (prevStatus && prevStatus !== newStatus) {
+  if (prevStatus && prevStatus !== newStatus && shouldNotifyThread(threadId)) {
     const threadTitle = getThreadTitleCached(threadId);
     if (newStatus === 'waiting_approval') {
       if (history.pendingApproval && liveApprovalState(threadId).live !== false && !isParsedApprovalClosed(threadId, history.pendingApproval)) {
@@ -2903,16 +3077,16 @@ function pushThreadUpdate(threadId, force = false) {
         title: '🛡️ Codex 需要审批',
         body: threadTitle ? `「${threadTitle}」在等待你的批准` : 'Codex 正在等待你的批准',
         tag: 'codex-approval-' + threadId,
-        url: '/#thread-' + threadId
+        url: '/#thread-' + threadId,
+        threadId
       });
-    } else if (prevStatus === 'working' && newStatus === 'idle') {
-      // 区分"正常完成"（末尾有完成标记）与"写静止停止"（中断/停止，无完成标记）
-      const tailComplete = rolloutTailIsComplete(info.path, stats);
+    } else if (prevStatus === 'working' && newStatus === 'idle' && rolloutTailIsComplete(info.path, stats)) {
       pushToAllDevices({
-        title: tailComplete ? '✅ Codex 任务完成' : '⏹️ Codex 任务已停止',
-        body: threadTitle ? `「${threadTitle}」${tailComplete ? '已完成' : '已停止'}` : (tailComplete ? '任务已完成，点击查看结果' : '任务已停止，点击查看详情'),
+        title: '✅ Codex 任务完成',
+        body: threadTitle ? `「${threadTitle}」已完成` : '任务已完成，点击查看结果',
         tag: 'codex-done-' + threadId,
-        url: '/#thread-' + threadId
+        url: '/#thread-' + threadId,
+        threadId
       });
     }
   }

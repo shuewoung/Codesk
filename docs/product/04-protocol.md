@@ -30,8 +30,10 @@
 | GET | `/api/auth/status` | 是否已登录、`hubId`、中继态（无需登录） |
 | GET | `/api/discover` | 未登录探测本机 Hub：`{ ok, hub, port, hubId }` |
 | GET | `/api/auth/pair-code` | 向中继申请一次性配对码（需已登录） |
+| GET/POST | `/api/thread-goal` | 当前会话目标。GET `threadId`；POST `{ threadId, objective }`，空 objective 清除 |
 | GET | `/api/host/status` `/api/host/clients` `/api/host/pair-code` | 本机主机台，仅 127.0.0.1 |
 | POST | `/api/host/kick` | `{ kind: "lan"|"relay", id }` 踢客户端，仅 127.0.0.1 |
+| POST | `/api/host/lan-code` | `{ code }` 设 4 位家里码；空则随机。仅 127.0.0.1 |
 
 中继新增（仅 VPS）：
 
@@ -60,13 +62,13 @@
 
 ### WebSocket 应用消息（已有，禁止改名）
 
-客户端 → 服务端：`get_threads` `get_config` `update_config` `create_thread` `rename_thread` `get_thread_history` `send_message` `send_steer` `send_stop` `send_approval` `get_file` `get_models` `get_workspace_tree` `upload_file` `search_thread` `register_push`
+客户端 → 服务端：`get_threads` `get_config` `update_config` `create_thread` `rename_thread` `get_thread_history` `send_message` `send_steer` `send_stop` `send_approval` `get_file` `get_models` `get_workspace_tree` `upload_file` `search_thread` `register_push` `get_goal` `set_goal`
 
-服务端 → 客户端：`thread_list` `config_data` `thread_created` `thread_renamed` `thread_history` `thread_update` `approval_request` `action_feedback` `ping` `file_data` `models_list` `workspace_tree` `upload_result` `search_results`
+服务端 → 客户端：`thread_list` `config_data` `thread_created` `thread_renamed` `thread_history` `thread_update` `approval_request` `action_feedback` `ping` `file_data` `models_list` `workspace_tree` `upload_result` `search_results` `goal_data`
 
 `send_approval` 可带可选 `kind`（`command` / `file` / `permissions`，或 app-server 方法名）。`decision`：`accept` | `acceptForSession` | `denied`（Hub 归一化，不改消息名）。有活锁时 Hub 走 follower；无活锁仍走本端 `decideApproval`。
 
-`/` 菜单项当普通 `send_message` 文本发出（`/review` `/compact` `/init` `/status` `/plan`），不另起 type。`/model` `/reasoning` `/mcp` 只打开已有前端菜单。
+`/` 菜单不要放分享、侧边、聊天分支、反馈、宠物、用量计费、初始化、推理、快速、新聊天、星标、模型、状态、记忆、重命名。现有项：`/compact` `/plan` 当普通 `send_message`；`/mcp` 打开已有菜单；`/goal` 打开目标面板（`get_goal` / `set_goal`，读写 `~/.codex/goals_1.sqlite`）。
 
 ### 命令面板 / 只读 Git（新增 type）
 
@@ -173,7 +175,7 @@ Hub 出站、手机连 VPS，外层都是：
 4. `http://<当前页 hostname>:18990`（hostname 是局域网 IP 时；原生可用 Expo `debuggerHost`）
 5. 最多再试同网段 `.1` / `.2` 两三个常见地址。每地址超时约 400ms，失败静默。
 
-探测成功只自动填局域网地址并提示「已发现本机 Hub」，仍要用户输入电脑上的 6 位码再 `POST /api/auth/login`。不要自动登录、不要自动 pair。
+探测成功只自动填局域网地址并提示「已发现本机 Hub」，仍要用户输入电脑上的 4 位家里码再 `POST /api/auth/login`。不要自动登录、不要自动 pair。
 
 出门时业务 REST 仍只打 Hub。页面若是中继静态站：会话走 WS 信封；`/api/file` 等 REST 仅在已选局域网地址时发往该 Hub。中继不代理业务 REST。
 

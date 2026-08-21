@@ -9,7 +9,7 @@ const FRAME = 248;
 function friendlyPairError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err || '');
   if (/too many|rate_limited|429/i.test(raw)) return '扫太快了，等两分钟或改手输。';
-  if (/invalid|过期|expired|口令错误/i.test(raw)) return '这个码用过了或过期了，请在电脑上重新生成。';
+  if (/过期|expired|配对码不对|用过/i.test(raw)) return '这个码用过了或过期了，请在电脑上点「刷新出门码」再扫右边。';
   if (/network request failed/i.test(raw)) return '手机连不上电脑或中继。先确认同一 WiFi，电脑 Hub 已开。';
   return raw || '配对失败';
 }
@@ -96,7 +96,7 @@ export function ScanScreen({ onClose }: { onClose: () => void }) {
         <Text style={styles.closeX}>×</Text>
       </Pressable>
       <View style={styles.bottom}>
-        <Text style={styles.hint}>{busy ? '正在连接…' : localError || '对准主机台右边的出门二维码'}</Text>
+        <Text style={styles.hint}>{busy ? '正在连接…' : localError || '对准主机台右边的出门二维码，不要扫左边'}</Text>
         {localError ? (
           <Pressable onPress={retry} style={styles.solidBtn}>
             <Text style={styles.solidLabel}>再扫一次</Text>

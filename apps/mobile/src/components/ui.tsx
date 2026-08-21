@@ -91,6 +91,41 @@ export function ErrorBanner({ text, onClose }: { text: string; onClose?: () => v
   );
 }
 
+export function FolderOutlineIcon({ size = 15, color, open = false }: { size?: number; color?: string; open?: boolean }) {
+  const { colors } = useTheme();
+  const c = color || colors.muted;
+  return (
+    <View style={{ width: size + 2, height: size, justifyContent: 'flex-end', marginRight: 6 }}>
+      <View
+        style={{
+          width: size * 0.46,
+          height: size * 0.32,
+          borderTopWidth: 1.3,
+          borderLeftWidth: 1.3,
+          borderRightWidth: 1.3,
+          borderColor: c,
+          borderTopLeftRadius: 2,
+          borderTopRightRadius: 2,
+          position: 'absolute',
+          top: 0,
+          left: 0,
+        }}
+      />
+      <View
+        style={{
+          width: size + 2,
+          height: size * 0.74,
+          borderWidth: 1.3,
+          borderColor: c,
+          borderRadius: 2.5,
+          backgroundColor: 'transparent',
+          transform: open ? [{ skewX: '-8deg' }] : [],
+        }}
+      />
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   pill: {
     flexDirection: 'row',

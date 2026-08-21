@@ -45,6 +45,25 @@ test('pairWithCode surfaces relay error message', async () => {
   await assert.rejects(() => pairWithCode('https://relay.example.com', 'NOPE'), /配对码不对/);
 });
 
+test('pairWithCode coalesces parallel scans of the same code', async () => {
+  let hits = 0;
+  mockFetch(async () => {
+    hits += 1;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    return new Response(JSON.stringify({ deviceToken: 'odt_x', hubId: 'hub-1' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  });
+  const [a, b] = await Promise.all([
+    pairWithCode('https://relay.example.com', 'ABC123'),
+    pairWithCode('https://relay.example.com', 'abc123'),
+  ]);
+  assert.equal(hits, 1);
+  assert.equal(a.deviceToken, 'odt_x');
+  assert.equal(b.deviceToken, 'odt_x');
+});
+
 test('pairWithCode maps fetch failure to network error', async () => {
   mockFetch(() => {
     throw new TypeError('Network request failed');

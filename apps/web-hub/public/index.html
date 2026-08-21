@@ -18,11 +18,9 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#f3f4f6">
 
-  <link rel="icon" type="image/svg+xml" href="icons/codesk-app.svg?v=3.38.0">
-  <link rel="icon" type="image/png" sizes="512x512" href="favicon-512.png?v=3.38.0">
-  <link rel="icon" type="image/png" sizes="192x192" href="favicon-192.png?v=3.38.0">
-  <link rel="alternate icon" href="favicon.ico?v=3.38.0">
-  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=3.38.0">
+  <link rel="icon" type="image/png" sizes="512x512" href="icons/codesk-app.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/codesk-app.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/codesk-app.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -33,7 +31,7 @@
   <script src="vendor/nacl.min.js"></script>
   <script src="e2e.js"></script>
 
-  <link rel="stylesheet" href="style.css?v=3.40.0">
+  <link rel="stylesheet" href="style.css?v=3.43.0">
 </head>
 <body>
   <div id="auth-overlay" class="auth-overlay">
@@ -47,9 +45,9 @@
       </div>
       <form id="auth-login-form" class="auth-form auth-block hidden">
         <strong>家里 WiFi</strong>
-        <p class="auth-hint">用主机台左边的常驻家里码。同一局域网，不经中继。</p>
+        <p class="auth-hint">用主机台左边的 4 位家里码。同一局域网，不经中继。</p>
         <label for="auth-password">家里码</label>
-        <input id="auth-password" type="text" autocomplete="one-time-code" placeholder="主机台左边那个码">
+        <input id="auth-password" type="text" autocomplete="one-time-code" maxlength="4" autocapitalize="characters" spellcheck="false" placeholder="4 位家里码">
         <label for="auth-lan-url">电脑地址</label>
         <div class="auth-lan-row">
           <input id="auth-lan-url" type="url" placeholder="http://192.168.1.8:18990" autocomplete="off">
@@ -94,6 +92,23 @@
   </div>
 
   <!-- Gesture Toast -->
+  <div id="goal-overlay" class="search-overlay hidden">
+    <div class="search-panel">
+      <div class="search-input-row">
+        <span class="search-icon">🎯</span>
+        <strong>目标</strong>
+        <button id="btn-close-goal" class="icon-btn" title="关闭" type="button">✕</button>
+      </div>
+      <div class="search-results" style="padding:16px">
+        <p class="search-hint">设置本会话要持续追求的目标。桌面 Codex 会读同一份记录。</p>
+        <textarea id="goal-input" rows="4" placeholder="例如：把短剧前 8 集改到可拍" style="width:100%;margin-top:10px;border:1px solid var(--border-color);border-radius:10px;padding:10px;font:inherit"></textarea>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+          <button type="button" id="btn-clear-goal" class="icon-btn">清除</button>
+          <button type="button" id="btn-save-goal" class="btn btn-primary">保存</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <div id="gesture-toast" class="gesture-toast hidden"></div>
   <div class="app-container">
     <aside id="sidebar" class="sidebar">
@@ -139,9 +154,6 @@
       </div>
       <div class="header-right">
         <a id="btn-open-host" class="header-link hidden" href="/host">主机台</a>
-        <button type="button" id="btn-show-pair-qr" class="icon-btn" title="手机扫码配对">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><path d="M14 14h3v3h-3z"></path><path d="M20 14v7h-7"></path></svg>
-        </button>
         <button id="btn-open-search" class="icon-btn" title="在当前会话内搜索">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
         </button>
@@ -357,17 +369,15 @@
         </div>
 
         <nav class="right-panel-tabs" role="tablist" aria-label="工作区面板导航">
-          <button type="button" class="right-tab-btn active" data-tab="files" role="tab" aria-selected="true">📁 文件</button>
+          <button type="button" class="right-tab-btn active" data-tab="files" role="tab" aria-selected="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="icon-folder-svg"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg> 文件</button>
           <button type="button" class="right-tab-btn" data-tab="git" role="tab" aria-selected="false">🌿 Git & 终端</button>
-          <button type="button" class="right-tab-btn" data-tab="subagents" role="tab" aria-selected="false">🤖 智能体</button>
-          <button type="button" class="right-tab-btn" data-tab="usage" role="tab" aria-selected="false">📊 用量</button>
         </nav>
 
-        <!-- Tab 1: Project Files Pane -->
+        <!-- Tab 1: Project Files & Underneath Subagents / Usage -->
         <div id="tab-pane-files" class="right-tab-pane">
           <div class="right-panel-card workspace-tree-card">
             <div class="card-header">
-              <span id="workspace-folder-name">📁 项目文件</span>
+              <span id="workspace-folder-name"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="icon-folder-svg"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg> 项目文件</span>
               <button id="btn-refresh-workspace" class="btn-icon-sm" title="刷新文件树">↻</button>
             </div>
             <div class="workspace-search-box">
@@ -375,6 +385,49 @@
             </div>
             <div id="workspace-tree-body" class="workspace-tree-body">
               <span class="placeholder-text">选择会话即可载入项目文件树</span>
+            </div>
+          </div>
+
+          <!-- Subagents Card -->
+          <div class="right-panel-card subagents-card">
+            <div class="card-header">
+              <span>🤖 子智能体</span>
+            </div>
+            <div class="card-body" id="subagent-list">
+              <span class="subagent-status-tag">没有运行中的子智能体</span>
+            </div>
+          </div>
+
+          <!-- Usage Card -->
+          <div class="right-panel-card usage-card">
+            <div class="card-header">
+              <span class="usage-title-row">
+                <span>📊 用量统计</span>
+                <span class="limit-plan-tag" id="quota-plan-tag">Codex Plus</span>
+              </span>
+              <span class="limit-reset-tag" id="quota-reset-text">重置: --</span>
+            </div>
+            <div class="usage-body">
+              <div class="limit-item">
+                <div class="limit-label-row">
+                  <span class="limit-label-title">账号限额</span>
+                  <span class="limit-val-text" id="quota-percent-text">剩余 --%</span>
+                </div>
+                <div class="limit-bar-track">
+                  <div class="limit-bar-fill" id="quota-bar-fill" style="width: 0%;"></div>
+                </div>
+              </div>
+
+              <div class="limit-item" style="margin-top: 10px;">
+                <div class="limit-label-row">
+                  <span class="limit-label-title">上下文</span>
+                  <span class="limit-val-text" id="gauge-percent-text">剩余 --%</span>
+                </div>
+                <div class="limit-bar-track">
+                  <div class="limit-bar-fill context-bar-fill" id="gauge-bar-fill" style="width: 0%;"></div>
+                </div>
+                <div class="gauge-sub-text" id="gauge-detail-text">待同步</div>
+              </div>
             </div>
           </div>
         </div>
@@ -397,56 +450,6 @@
               <button type="button" id="btn-run-cmd" class="btn-icon-sm" title="运行">▶</button>
             </div>
             <pre id="cmd-panel" class="panel-pre">输出会显示在这里</pre>
-          </div>
-        </div>
-
-        <!-- Tab 3: Subagents Pane -->
-        <div id="tab-pane-subagents" class="right-tab-pane hidden">
-          <div class="right-panel-card">
-            <div class="card-header">
-              <span>子智能体</span>
-            </div>
-            <div class="card-body" id="subagent-list">
-              <span class="subagent-status-tag">没有运行中的子智能体</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Tab 4: Usage & Rate Limits Pane -->
-        <div id="tab-pane-usage" class="right-tab-pane hidden">
-          <div class="token-gauge-widget" title="账号限额与上下文 Token 用量统计">
-            <!-- Account Rate Limit Usage & Remaining Quota Card -->
-            <div class="account-rate-limit-card">
-              <div class="account-limit-header">
-                <span class="limit-plan-tag" id="quota-plan-tag">Codex Plus</span>
-                <span class="limit-reset-tag" id="quota-reset-text">重置: --</span>
-              </div>
-              <div class="limit-item">
-                <div class="limit-label-row">
-                  <span class="limit-label-title">账号限额</span>
-                  <span class="limit-val-text" id="quota-percent-text">剩余 --%</span>
-                </div>
-                <div class="limit-bar-track">
-                  <div class="limit-bar-fill" id="quota-bar-fill" style="width: 0%;"></div>
-                </div>
-              </div>
-            </div>
-
-            <div class="gauge-ring-divider"></div>
-
-            <!-- Context Window Token Horizontal Bar -->
-            <div class="account-rate-limit-card">
-              <div class="limit-item">
-                <div class="limit-label-row">
-                  <span class="limit-label-title">上下文</span>
-                  <span class="limit-val-text" id="gauge-percent-text">剩余 --%</span>
-                </div>
-                <div class="limit-bar-track">
-                  <div class="limit-bar-fill context-bar-fill" id="gauge-bar-fill" style="width: 0%;"></div>
-                </div>
-                <div class="gauge-sub-text" id="gauge-detail-text">待同步</div>
-              </div>
-            </div>
           </div>
         </div>
       </aside>
@@ -491,6 +494,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=3.40.0"></script>
+  <script src="app.js?v=3.43.0"></script>
 </body>
 </html>

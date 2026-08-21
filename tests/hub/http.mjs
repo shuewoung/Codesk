@@ -63,6 +63,39 @@ try {
   }
   record('ws denied without login', wsDenied);
 
+  const hostStatus = await (await fetch(`${hub.base}/api/host/status`)).json();
+  record('lan code is 4 chars', /^[0-9A-Z]{4}$/.test(hostStatus.lanCode || ''), hostStatus.lanCode);
+
+  const badLanCode = await fetch(`${hub.base}/api/host/lan-code`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code: 'TOOLONG' }),
+  });
+  record('rejects non-4-char lan code', badLanCode.status === 400);
+
+  const setLan = await fetch(`${hub.base}/api/host/lan-code`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code: 'home' }),
+  });
+  const setLanJson = await setLan.json();
+  record('can set custom lan code', setLan.ok && setLanJson.lanCode === 'HOME', setLanJson.lanCode);
+
+  const lanLogin = await fetch(`${hub.base}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'HOME' }),
+  });
+  record('login accepts custom lan code', lanLogin.ok);
+
+  const regenLan = await fetch(`${hub.base}/api/host/lan-code`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  const regenLanJson = await regenLan.json();
+  record('regen yields new 4-char lan code', regenLan.ok && /^[0-9A-Z]{4}$/.test(regenLanJson.lanCode || '') && regenLanJson.lanCode !== 'HOME', regenLanJson.lanCode);
+
   const badLogin = await fetch(`${hub.base}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

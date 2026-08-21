@@ -323,14 +323,10 @@ const TOOL_LABELS = {
 };
 
 const SLASH_ITEMS = [
-  { cmd: '/review', desc: '代码审查', kind: 'send' },
+  { cmd: '/mcp', desc: 'MCP 服务器', kind: 'mcp' },
   { cmd: '/compact', desc: '压缩上下文', kind: 'send' },
-  { cmd: '/init', desc: '初始化项目', kind: 'send' },
-  { cmd: '/status', desc: '查看状态', kind: 'send' },
-  { cmd: '/plan', desc: '规划模式', kind: 'send' },
-  { cmd: '/model', desc: '选择模型', kind: 'model' },
-  { cmd: '/reasoning', desc: '推理强度', kind: 'effort' },
-  { cmd: '/mcp', desc: 'MCP 服务器', kind: 'mcp' }
+  { cmd: '/plan', desc: '计划模式', kind: 'send' },
+  { cmd: '/goal', desc: '设置要持续追求的目标', kind: 'goal' }
 ];
 
 function persistConn() {
@@ -1016,6 +1012,8 @@ function handleWSMessage(msg) {
         input: pending.input
       });
     }
+  } else if (msg.type === 'goal_data') {
+    if (msg.threadId === currentThreadId) fillGoalEditor(msg.goal);
   } else if (msg.type === 'thread_renamed') {
     if (msg.threadId === currentThreadId && msg.title) {
       safeSetText(activeSessionTitle, msg.title);
@@ -1080,6 +1078,12 @@ function handleWSMessage(msg) {
   }
 }
 
+function getRemainingColor(pct) {
+  if (pct > 35) return { bar: 'linear-gradient(90deg, #60a5fa 0%, #3b82f6 100%)', text: '#2563eb' }; // 充足 (>35%): 蓝色
+  if (pct > 15) return { bar: 'linear-gradient(90deg, #fbbf24 0%, #f59e0b 100%)', text: '#d97706' }; // 预警 (15%~35%): 橙黄
+  return { bar: 'linear-gradient(90deg, #f87171 0%, #ef4444 100%)', text: '#dc2626' }; // 告急 (<15%): 红色
+}
+
 // Apply Config Data Read from C:\Users\zhang\.codex\config.toml
 function applyAccountQuota(tokenUsage) {
   if (!tokenUsage) return;
@@ -1090,10 +1094,16 @@ function applyAccountQuota(tokenUsage) {
   const primaryPct = tokenUsage.primaryUsedPercent;
   if (primaryPct !== undefined && primaryPct !== null) {
     const remainPct = Math.max(0, Math.min(100, Math.round(100 - primaryPct)));
+    const colors = getRemainingColor(remainPct);
     safeSetText(quotaPercentText, `剩余 ${remainPct}%`);
-    if (quotaBarFill) quotaBarFill.style.width = `${remainPct}%`;
+    if (quotaPercentText) quotaPercentText.style.color = colors.text;
+    if (quotaBarFill) {
+      quotaBarFill.style.width = `${remainPct}%`;
+      quotaBarFill.style.background = colors.bar;
+    }
   } else {
     safeSetText(quotaPercentText, '待同步');
+    if (quotaPercentText) quotaPercentText.style.color = '';
     if (quotaBarFill) quotaBarFill.style.width = '0%';
   }
   if (tokenUsage.resetAtMs) {
@@ -1220,6 +1230,8 @@ function applyAccessMode(mode, persist) {
 let lastSidebarRenderSig = '';
 
 function compareThreads(a, b) {
+  if (!!b.isPinned !== !!a.isPinned) return a.isPinned ? -1 : 1;
+  if (!!b.isActive !== !!a.isActive) return a.isActive ? 1 : -1;
   return (b.mtimeMs || 0) - (a.mtimeMs || 0);
 }
 
@@ -1295,11 +1307,22 @@ function projectFolderThreads(proj, q) {
 }
 
 function renderThreadItem(t, projectName) {
+  if (!t || !t.id) return '';
+  const isWorking = Boolean(t.isActive || t.status === 'working' || t.working);
+  const isWaiting = Boolean(t.needsApproval || t.status === 'waiting_approval');
+
+  let statusTag = '';
+  if (isWorking) {
+    statusTag = '<span class="thread-status-tag tag-working" title="正在运行"><span class="status-pulse-dot"></span> 运行中</span>';
+  } else if (isWaiting) {
+    statusTag = '<span class="thread-status-tag tag-waiting" title="等待批准">✋ 需批准</span>';
+  }
+
   return `
-      <div class="thread-item ${t.id === currentThreadId ? 'active' : ''}" data-id="${t.id}" data-title="${escapeHtml(t.title)}" data-project="${escapeHtml(projectName || t.projectName || '')}" title="双击重命名">
+      <div class="thread-item ${t.id === currentThreadId ? 'active' : ''} ${isWorking ? 'working' : ''}" data-id="${t.id}" data-title="${escapeHtml(t.title)}" data-project="${escapeHtml(projectName || t.projectName || '')}" title="双击重命名">
         ${t.isPinned ? '<span class="pin-mark" title="置顶">📌</span>' : ''}
         <span class="thread-item-title">${escapeHtml(t.title || '新聊天')}</span>
-        ${t.isActive ? '<span class="status-pulse-dot"></span>' : ''}
+        ${statusTag}
       </div>
     `;
 }
@@ -1307,15 +1330,29 @@ function renderThreadItem(t, projectName) {
 function renderProjectFolder(proj, threads) {
   const expanded = !!sidebarFilter.trim() || expandedProjects.has(proj.name);
   const threadsHtml = (threads || []).map((t) => renderThreadItem(t, proj.name)).join('');
+
+  const workingCount = (threads || []).filter((t) => t && (t.isActive || t.status === 'working' || t.working)).length;
+  const waitingCount = (threads || []).filter((t) => t && (t.needsApproval || t.status === 'waiting_approval')).length;
+  const justFinishedCount = (threads || []).filter((t) => t && !t.isActive && t.status !== 'working' && !t.working && !t.needsApproval && t.status !== 'waiting_approval' && (Date.now() - (t.mtimeMs || 0) < 60000)).length;
+
+  let folderBadge = '';
+  if (workingCount > 0) {
+    folderBadge = `<span class="folder-status-badge badge-working" title="${workingCount} 个任务运行中"><span class="status-pulse-dot"></span> ${workingCount}</span>`;
+  } else if (waitingCount > 0) {
+    folderBadge = `<span class="folder-status-badge badge-waiting" title="${waitingCount} 个任务等待批准">✋ ${waitingCount}</span>`;
+  } else if (justFinishedCount > 0) {
+    folderBadge = `<span class="folder-status-badge badge-finished" title="${justFinishedCount} 个任务刚刚完成">✓ ${justFinishedCount}</span>`;
+  }
+
   return `
       <div class="project-folder ${expanded ? 'expanded' : ''}" data-project="${escapeHtml(proj.name)}">
         <div class="project-folder-header" data-project="${escapeHtml(proj.name)}" data-cwd="${escapeHtml(proj.cwd || '')}">
-          <span class="folder-chevron">▸</span>
           <span class="project-icon">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h6l2 2h10v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>
           </span>
           <span class="project-name">${escapeHtml(proj.name)}</span>
           ${proj.isPinned ? '<span class="pin-mark" title="置顶">📌</span>' : ''}
+          ${folderBadge}
           <span class="project-count">${(threads || []).length}</span>
           <button type="button" class="btn-project-new" data-cwd="${escapeHtml(proj.cwd || '')}" title="在此项目新建对话">+</button>
         </div>
@@ -1822,14 +1859,18 @@ function renderThreadDetail(data, opts = {}) {
       const pct = tokenUsage.usedPercent;
       if (pct !== undefined && pct !== null) {
         const remainPct = Math.max(0, Math.min(100, Math.round(100 - pct)));
+        const colors = getRemainingColor(remainPct);
         gaugeBarFill.style.width = `${remainPct}%`;
+        gaugeBarFill.style.background = colors.bar;
         safeSetText(gaugePercentText, `剩余 ${remainPct}%`);
+        if (gaugePercentText) gaugePercentText.style.color = colors.text;
         const totalK = ((tokenUsage.totalTokens || 0) / 1000).toFixed(1);
         const maxK = ((tokenUsage.maxContext || 0) / 1000).toFixed(1);
         safeSetText(gaugeDetailText, `${totalK}K / ${maxK}K`);
       } else {
         gaugeBarFill.style.width = '0%';
         safeSetText(gaugePercentText, '--');
+        if (gaugePercentText) gaugePercentText.style.color = '';
         safeSetText(gaugeDetailText, '待同步');
       }
     }
@@ -1959,12 +2000,17 @@ function renderThreadDetail(data, opts = {}) {
           latestCommandText = `正在运行 ${cleanCmd}`;
           break;
         } else if (item.type === 'function_call') {
-          // 与桌面端一致：显示真实工具活动（exec_command 显示实际命令）
           let args = item.arguments;
           if (typeof args === 'string') { try { args = JSON.parse(args); } catch (e) { args = null; } }
           const cmd = args && typeof args.cmd === 'string' ? cleanText(args.cmd).replace(/\\n/g, ' ').substring(0, 120) : '';
           const label = (item.name || 'tool').replace(/_/g, ' ');
-          latestCommandText = cmd ? `正在执行: ${cmd}` : `正在调用 ${label}...`;
+          if (label === 'wait' || cmd.includes('wait_agent') || label.includes('wait')) {
+            latestCommandText = '智能体正在执行任务中...';
+          } else if (label.includes('spawn agent') || cmd.includes('spawn_agent')) {
+            latestCommandText = '正在派发子智能体...';
+          } else {
+            latestCommandText = cmd ? `正在执行: ${cmd}` : `正在调用 ${label}...`;
+          }
           break;
         } else if (item.type === 'reasoning') {
           latestCommandText = '正在深度思考与推理中...';
@@ -2062,7 +2108,7 @@ async function loadWorkspaceTree(cwd) {
     const data = await res.json();
     if (data.success) {
       currentWorkspaceTreeData = data;
-      workspaceFolderName.textContent = `📁 ${data.rootName}`;
+      workspaceFolderName.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="icon-folder-svg"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg> <span>${escapeHtml(data.rootName)}</span>`;
       collectFileMapFromTree(data.tree);
       renderWorkspaceTreeUI(data.tree, workspaceFileSearch.value.trim());
     } else {
@@ -2071,6 +2117,68 @@ async function loadWorkspaceTree(cwd) {
   } catch (e) {
     workspaceTreeBody.innerHTML = `<div class="placeholder-text">网络加载失败</div>`;
   }
+}
+
+function getFileIconHtml(filename) {
+  const lower = String(filename || '').toLowerCase();
+  if (lower === '.gitignore' || lower === '.gitmodules' || lower === '.gitattributes') {
+    return '<span class="tree-file-icon" style="color: #f05032;">◆</span>';
+  }
+  if (lower.startsWith('readme') || lower.endsWith('.md') || lower.endsWith('.markdown') || lower.endsWith('.mdx')) {
+    return '<span class="tree-file-icon" style="color: #38bdf8;">ℹ</span>';
+  }
+  if (lower === 'package.json' || lower === 'package-lock.json' || lower === 'pnpm-lock.yaml' || lower === 'yarn.lock' || lower === 'bun.lockb') {
+    return '<span class="tree-file-icon" style="color: #ef4444;">⬢</span>';
+  }
+  if (lower.startsWith('license') || lower.startsWith('licence')) {
+    return '<span class="tree-file-icon" style="color: #eab308;">⚖</span>';
+  }
+  if (lower === 'dockerfile' || lower.startsWith('docker-compose')) {
+    return '<span class="tree-file-icon" style="color: #38bdf8;">🐳</span>';
+  }
+  if (/\.(png|jpg|jpeg|gif|webp|svg|ico|bmp|avif)$/i.test(lower)) {
+    return '<span class="tree-file-icon" style="color: #c084fc;">🖼</span>';
+  }
+  if (/\.(html|htm)$/i.test(lower)) {
+    return '<span class="tree-file-icon" style="color: #f97316;">🌐</span>';
+  }
+  if (/\.(css|scss|sass|less)$/i.test(lower)) {
+    return '<span class="tree-file-icon" style="color: #38bdf8;">🎨</span>';
+  }
+  if (/\.(tsx|ts)$/i.test(lower)) {
+    return '<span class="tree-file-badge" style="color: #3b82f6; border-color: #3b82f6;">TS</span>';
+  }
+  if (/\.(jsx|js|mjs|cjs)$/i.test(lower)) {
+    return '<span class="tree-file-badge" style="color: #eab308; border-color: #eab308;">JS</span>';
+  }
+  if (/\.(json|json5|jsonc)$/i.test(lower)) {
+    return '<span class="tree-file-badge" style="color: #f59e0b; border-color: #f59e0b;">{}</span>';
+  }
+  if (/\.(yaml|yml|toml|ini|cfg|conf|config|env|env\..*)$/i.test(lower)) {
+    return '<span class="tree-file-icon" style="color: #94a3b8;">⚙</span>';
+  }
+  if (/\.(py|pyw|ipynb)$/i.test(lower)) {
+    return '<span class="tree-file-icon" style="color: #3b82f6;">🐍</span>';
+  }
+  if (/\.(rs)$/i.test(lower)) {
+    return '<span class="tree-file-icon" style="color: #f97316;">🦀</span>';
+  }
+  if (/\.(go)$/i.test(lower)) {
+    return '<span class="tree-file-icon" style="color: #06b6d4;">🐹</span>';
+  }
+  if (/\.(sh|bash|zsh|ps1|bat|cmd)$/i.test(lower)) {
+    return '<span class="tree-file-icon" style="color: #22c55e;">⚡</span>';
+  }
+  if (/\.(sqlite|db|sql)$/i.test(lower)) {
+    return '<span class="tree-file-icon" style="color: #0ea5e9;">🗄</span>';
+  }
+  if (/\.(zip|tar|gz|7z|rar)$/i.test(lower)) {
+    return '<span class="tree-file-icon" style="color: #ea580c;">📦</span>';
+  }
+  if (/\.(pdf|doc|docx|xls|xlsx|ppt|pptx)$/i.test(lower)) {
+    return '<span class="tree-file-icon" style="color: #ef4444;">📑</span>';
+  }
+  return '<span class="tree-file-icon" style="color: #94a3b8;">📄</span>';
 }
 
 function renderWorkspaceTreeUI(tree, filterKeyword = '') {
@@ -2087,14 +2195,13 @@ function renderWorkspaceTreeUI(tree, filterKeyword = '') {
         if (item.type === 'file' && !matches) continue;
       }
 
-      const indent = depth * 12;
+      const indent = depth * 14;
       if (item.type === 'directory') {
         const childrenHtml = item.children ? renderItems(item.children, depth + 1) : '';
         html += `
           <div class="tree-dir-group">
             <div class="tree-dir-item" style="padding-left: ${indent + 8}px;" data-action="toggle-dir">
               <span class="tree-arrow">›</span>
-              <span class="tree-icon">📁</span>
               <span class="tree-name">${escapeHtml(item.name)}</span>
             </div>
             <div class="tree-children">
@@ -2103,10 +2210,9 @@ function renderWorkspaceTreeUI(tree, filterKeyword = '') {
           </div>
         `;
       } else {
-        const icon = item.ext === '.md' ? '📄' : (item.ext === '.json' || item.ext === '.toml' ? '⚙️' : '📄');
         html += `
-          <div class="tree-file-item" style="padding-left: ${indent + 20}px;" data-path="${escapeHtml(item.path)}">
-            <span class="tree-icon">${icon}</span>
+          <div class="tree-file-item" style="padding-left: ${indent + 22}px;" data-path="${escapeHtml(item.path)}">
+            ${getFileIconHtml(item.name)}
             <span class="tree-name">${escapeHtml(item.name)}</span>
           </div>
         `;
@@ -2213,27 +2319,20 @@ function renderDesktopFeedNodes(items, toolOutputs) {
     }
   }
 
-  // 100% Official Agent Status Node: 🟢 Main writer e25 e30  已更新
-  // 价值低：移动端默认只显示前 2 个，点击「展开全部」查看其余（防撑破）
+  // Low-profile agent status node: 🤖 Main writer e25 e30  已更新
   function flushAgentBatch() {
     if (pendingAgentBatch.length > 0) {
       const badgesHtml = pendingAgentBatch.map(name => `
         <span class="inline-agent-node">
-          <span class="agent-dot">🟢</span>
-          <span class="agent-name-pill">${escapeHtml(cleanAgentName(name))}</span>
+          <span class="inline-node-icon"><svg class="wireframe-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="3"></rect><circle cx="8.5" cy="16" r="1.5"></circle><circle cx="15.5" cy="16" r="1.5"></circle><path d="M12 2v4M12 6a3 3 0 0 0-3 3v2h6V9a3 3 0 0 0-3-3Z"></path></svg></span>
+          <span class="agent-name-text">${escapeHtml(cleanAgentName(name))}</span>
           <span class="agent-status-text">${escapeHtml(pendingAgentStatus || '已更新')}</span>
         </span>
       `).join('');
 
-      const extraCount = pendingAgentBatch.length - 2;
-      const toggleBtn = extraCount > 0
-        ? `<button class="agent-toggle-btn" data-action="toggle-agent-list">展开全部 (+${extraCount})</button>`
-        : '';
-
       nodes.push(`
         <div class="inline-node agent-status-list">
           ${badgesHtml}
-          ${toggleBtn}
         </div>
       `);
       pendingAgentBatch = [];
@@ -2246,8 +2345,24 @@ function renderDesktopFeedNodes(items, toolOutputs) {
     const cards = pendingCommandBatch.map((entry) => {
       if (entry && entry.kind === 'file') return renderFileChangeCard(entry.item);
       return renderCommandCard(entry && entry.item ? entry.item : { input: entry });
-    });
-    nodes.push(`<div class="command-card-stack">${cards.join('')}</div>`);
+    }).filter(c => c && c.trim().length > 0);
+
+    if (cards.length === 1) {
+      nodes.push(`<div class="command-card-stack">${cards[0]}</div>`);
+    } else if (cards.length > 1) {
+      nodes.push(`
+        <div class="command-card-stack command-group collapsed">
+          <div class="command-group-head" data-action="toggle-command-group">
+            <span class="command-card-icon"><svg class="wireframe-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"></rect><polyline points="7 10 10 12 7 14"></polyline><line x1="12" y1="14" x2="16" y2="14"></line></svg></span>
+            <span class="command-group-label">终端执行了 ${cards.length} 条命令</span>
+            <span class="command-group-arrow">▾</span>
+          </div>
+          <div class="command-group-children hidden">
+            ${cards.join('')}
+          </div>
+        </div>
+      `);
+    }
     pendingCommandBatch = [];
   }
 
@@ -2274,19 +2389,31 @@ function renderDesktopFeedNodes(items, toolOutputs) {
       }
 
       if (role === 'user') {
+        const trimmed = text.trim();
+        // Check if this is an internal subagent completion JSON or tool callback envelope
+        const isSubagentCallback = trimmed.includes('"agent_path":') || trimmed.includes('"agent_path"') || (trimmed.startsWith('{') && (trimmed.includes('"completed"') || trimmed.includes('"status"') || trimmed.includes('"cell_id"')));
+        if (isSubagentCallback) {
+          const parsed = parseJsonish(trimmed) || parseJsonish(trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
+          const completedText = parsed && (parsed.status && parsed.status.completed || parsed.completed || parsed.output);
+          if (completedText && typeof completedText === 'string') {
+            currentAssistantText.push(completedText);
+          }
+          continue;
+        }
+
         flushAssistantText();
         flushAgentBatch();
         flushCommandBatch();
 
         const linesCount = text.split('\n').length;
-        const isLongPrompt = linesCount > 5 || text.length > 180;
+        const isLongPrompt = linesCount > 5 || text.length > 250;
 
         nodes.push(`
           <div class="message-card role-user">
             <div class="message-header">👤 USER 用户指令</div>
             <div class="user-prompt-wrapper">
               <div class="user-prompt-content ${isLongPrompt ? 'collapsed' : ''}">
-                <div class="markdown-body">${renderMarkdown(text)}</div>
+                ${renderUserPrompt(text)}
               </div>
               ${isLongPrompt ? `<button class="btn-toggle-prompt" data-action="toggle-prompt">展开全文 ˅</button>` : ''}
             </div>
@@ -2334,7 +2461,7 @@ function renderDesktopFeedNodes(items, toolOutputs) {
       flushCommandBatch();
       nodes.push(`
         <div class="inline-node">
-          <span class="inline-node-icon">🔄</span>
+          <span class="inline-node-icon"><svg class="wireframe-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg></span>
           <span>上下文已自动压缩</span>
         </div>
       `);
@@ -2427,7 +2554,7 @@ function renderFileChangeCard(item) {
     <div class="file-change-card">
       <div class="file-change-header">
         <div class="file-change-left">
-          <div class="file-change-icon-box">✎</div>
+          <div class="file-change-icon-box"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg></div>
           <div>
             <div class="file-change-title">已更改 ${files.length || 1} 个文件</div>
             <div class="file-change-stats"><span class="diff-add">+${add}</span><span class="diff-del">-${del}</span></div>
@@ -2439,19 +2566,103 @@ function renderFileChangeCard(item) {
   `;
 }
 
+function extractActualCommand(raw) {
+  if (!raw) return '';
+  const str = String(raw).trim();
+  // 1. Match tools.exec_command({cmd: "..."}) or tools.exec({cmd: "..."})
+  const m = str.match(/tools\.(?:exec_command|exec)\(\s*\{[\s\S]*?cmd\s*:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/i);
+  if (m) {
+    let inner = m[1] || m[2] || '';
+    try {
+      inner = JSON.parse(`"${inner}"`);
+    } catch (e) {
+      inner = inner.replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+    }
+    return inner.trim();
+  }
+  // 2. Match JSON object with cmd / command
+  if (str.startsWith('{') && str.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(str);
+      if (parsed && (parsed.cmd || parsed.command)) return String(parsed.cmd || parsed.command).trim();
+    } catch (e) {}
+  }
+  return str;
+}
+
 function renderCommandCard(item) {
   const d = describeToolItem(item);
-  const label = TOOL_LABELS[d.name] || (d.name || '命令').replace(/_/g, ' ');
-  const body = d.cmd || d.path || (d.args ? JSON.stringify(d.args, null, 2) : '') || '';
+  const rawInput = d.cmd || d.path || (d.args ? (typeof d.args === 'string' ? d.args : JSON.stringify(d.args, null, 2)) : '') || '';
+  const actualCmd = extractActualCommand(rawInput);
   const out = item.output || item.stdout || '';
-  return `
-    <div class="command-card">
-      <div class="command-card-head">
-        <span class="command-card-icon">$</span>
-        <span class="command-card-label">${escapeHtml(label)}</span>
+
+  // 1. Detect Multi-Agent Spawn (e.g. tools.multi_agent_v1__spawn_agent)
+  if (d.name.includes('spawn_agent') || rawInput.includes('spawn_agent')) {
+    let agentName = '';
+    const m = rawInput.match(/agent_type\s*:\s*["']([^"']+)["']/i) || rawInput.match(/name\s*:\s*["']([^"']+)["']/i) || rawInput.match(/agent\s*:\s*["']([^"']+)["']/i);
+    if (m) agentName = m[1];
+    return `
+      <div class="inline-node">
+        <span class="inline-node-icon"><svg class="wireframe-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="4"></circle><path d="M5.5 21v-2a6.5 6.5 0 0 1 13 0v2"></path></svg></span>
+        <span>使用子智能体：<strong>${escapeHtml(agentName || '子智能体')}</strong></span>
       </div>
-      ${body ? `<pre class="command-card-cmd">${escapeHtml(String(body).slice(0, 2000))}</pre>` : ''}
-      ${out ? `<pre class="command-card-out">${escapeHtml(String(out).slice(0, 2000))}</pre>` : ''}
+    `;
+  }
+
+  // 2. Detect Multi-Agent Close (e.g. tools.multi_agent_v1__close_agent)
+  if (d.name.includes('close_agent') || rawInput.includes('close_agent')) {
+    return `
+      <div class="inline-node">
+        <span class="inline-node-icon"><svg class="wireframe-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="7" r="4"></circle><path d="M3.5 21v-2a6.5 6.5 0 0 1 11.5-4.5"></path><line x1="17" y1="17" x2="22" y2="22"></line><line x1="22" y1="17" x2="17" y2="22"></line></svg></span>
+        <span>已关闭 1 个智能体</span>
+      </div>
+    `;
+  }
+
+  // 3. Detect Multi-Agent Wait / Cell Wait (Internal polling tick, omit)
+  if (d.name.includes('wait_agent') || rawInput.includes('wait_agent') || d.name === 'wait') {
+    return '';
+  }
+
+  // 4. Detect Skill Reading (e.g. read_file of SKILL.md or short-drama-factory)
+  if (d.name.includes('skill') || rawInput.includes('SKILL.md') || rawInput.includes('short-drama-factory') || (d.path && d.path.includes('skill'))) {
+    let skillName = '';
+    const m = rawInput.match(/([a-zA-Z0-9_-]+)[\\/]SKILL\.md/i) || rawInput.match(/skill[s]?[\\/]([a-zA-Z0-9_-]+)/i) || rawInput.match(/short-drama-factory/i);
+    if (m) {
+      const captured = m[0].includes('short-drama-factory') ? 'Short Drama Factory' : m[1];
+      if (captured && captured.toLowerCase() !== 'skill') {
+        skillName = captured;
+      }
+    }
+    return `
+      <div class="inline-node">
+        <span class="inline-node-icon"><svg class="wireframe-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"></line><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a1 1 0 0 0 0-2H8a1 1 0 0 0 0 2h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"></path></svg></span>
+        <span>已读取 <strong>${escapeHtml(skillName || '技能')}</strong></span>
+      </div>
+    `;
+  }
+
+  // 5. Clean Single-line Exec/Command Node (Zero boxes, subtle gray, 1:1 Codex official)
+  let cmdLine = actualCmd.split('\n').find(l => l.trim().length > 0) || '命令';
+  cmdLine = cmdLine.trim().replace(/^\$\s*/, '');
+  if (cmdLine.startsWith('const r = await tools.')) {
+    cmdLine = cmdLine.replace(/^const r = await tools\.[a-zA-Z0-9_]+\(\{?/, '').trim();
+  }
+  if (cmdLine.length > 80) cmdLine = cmdLine.slice(0, 77) + '...';
+
+  const label = cmdLine ? `exec ${cmdLine}` : '运行了命令';
+
+  return `
+    <div class="command-card inline-exec-node collapsed">
+      <div class="command-card-head" data-action="toggle-command-card">
+        <span class="command-card-icon"><svg class="wireframe-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"></rect><polyline points="7 10 10 12 7 14"></polyline><line x1="12" y1="14" x2="16" y2="14"></line></svg></span>
+        <span class="command-card-label">${escapeHtml(label)}</span>
+        <span class="command-card-arrow">▾</span>
+      </div>
+      <div class="command-card-body hidden">
+        ${actualCmd ? `<pre class="command-card-cmd">${escapeHtml(String(actualCmd).slice(0, 4000))}</pre>` : ''}
+        ${out && out !== '[object Object],[object Object]' ? `<pre class="command-card-out">${escapeHtml(String(out).slice(0, 4000))}</pre>` : ''}
+      </div>
     </div>
   `;
 }
@@ -2632,12 +2843,17 @@ function makeFileLink(fullPath, label) {
   const clean = stripFileUrl(fullPath);
   const rawLabel = String(label || '').replace(/<[^>]+>/g, '').replace(/^📄\s*/, '').trim();
   const text = rawLabel && !isAbsFilePath(rawLabel) && rawLabel.length < 80 ? rawLabel : fileBasename(clean);
-  return `<a class="file-link-inline" title="${escapeHtml(clean)}" data-file-path="${escapeHtml(clean)}"><span class="file-link-icon">📄</span><span class="file-link-text">${escapeHtml(text)}</span></a>`;
+  return `<a class="file-link-inline" title="${escapeHtml(clean)}" data-file-path="${escapeHtml(clean)}"><span class="file-link-text">${escapeHtml(text)}</span></a>`;
 }
 
 function alreadyInsideFileAttr(html, offset) {
   const before = html.slice(Math.max(0, offset - 24), offset);
   return /(?:data-file-path|title|href)=["']?$/.test(before);
+}
+
+function renderUserPrompt(text) {
+  if (!text) return '';
+  return `<div class="user-text-body">${escapeHtml(text).replace(/\n/g, '<br>')}</div>`;
 }
 
 function renderMarkdown(text) {
@@ -2706,7 +2922,7 @@ async function openFileModal(filePath) {
   fileModal.classList.remove('hidden');
   fileModalName.textContent = '正在读取文件...';
   fileModalPath.textContent = filePath;
-  fileModalBody.innerHTML = '<div class="loading-spinner">⚡ 正在读取本地磁盘物理文件并在线渲染 Markdown...</div>';
+  fileModalBody.innerHTML = '<div class="loading-spinner">⚡ 正在读取本地文件...</div>';
 
   try {
     const qs = new URLSearchParams({ path: filePath });
@@ -2715,36 +2931,132 @@ async function openFileModal(filePath) {
     const data = await res.json();
     if (data.success) {
       lastFileMeta = { name: data.fileName, path: data.path, content: data.content || '' };
-      fileModalName.textContent = `📄 ${data.fileName}`;
+      fileModalName.textContent = `${data.fileName}`;
       fileModalPath.textContent = data.path;
 
-      if (data.ext === '.md' || data.fileName.endsWith('.md')) {
+      const ext = String(data.ext || '').toLowerCase();
+      const isImg = data.encoding === 'base64' || ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.svg'].includes(ext);
+      const isMd = ['.md', '.markdown', '.mdx'].includes(ext) || data.fileName.endsWith('.md');
+      const isHtml = ['.html', '.htm'].includes(ext);
+
+      if (isImg) {
+        fileModalBody.innerHTML = `
+          <div class="file-preview-banner">
+            <span>🖼️ 图片预览 (${ext})</span>
+            <button type="button" class="btn-copy-file-text" onclick="downloadLastFile()">下载图片</button>
+          </div>
+          <div class="file-image-preview-container">
+            <img src="data:image/${ext.replace('.', '') || 'png'};base64,${data.content}" alt="${escapeHtml(data.fileName)}" class="file-preview-img" />
+          </div>
+        `;
+      } else if (isMd) {
         const renderedHtml = typeof marked !== 'undefined' ? marked.parse(data.content) : escapeHtml(data.content);
         fileModalBody.innerHTML = `
           <div class="file-preview-banner">
-            <span>✨ 格式：Markdown 文档</span>
-            <span class="file-size-tag">${data.content.length} 字符</span>
+            <span>✨ Markdown 文档渲染引擎</span>
+            <div class="file-banner-actions">
+              <span class="file-size-tag">${data.content.length} 字符</span>
+              <button type="button" class="btn-copy-file-text" onclick="copyFileModalContent()">复制全文</button>
+            </div>
           </div>
           <div class="markdown-body">${renderedHtml}</div>
         `;
-      } else {
+        if (typeof hljs !== 'undefined') {
+          fileModalBody.querySelectorAll('pre code').forEach((block) => hljs.highlightElement(block));
+        }
+      } else if (isHtml) {
         fileModalBody.innerHTML = `
           <div class="file-preview-banner">
-            <span>📄 代码 / 文本文件 (${data.ext})</span>
-            <span class="file-size-tag">${data.content.length} 字符</span>
+            <div class="file-html-mode-tabs">
+              <button type="button" class="html-tab-btn active" id="btn-html-tab-live">🌐 网页实时预览</button>
+              <button type="button" class="html-tab-btn" id="btn-html-tab-code">💻 HTML 源码</button>
+            </div>
+            <div class="file-banner-actions">
+              <span class="file-size-tag">${data.content.length} 字符</span>
+              <button type="button" class="btn-copy-file-text" onclick="copyFileModalContent()">复制源码</button>
+            </div>
           </div>
-          <pre><code>${escapeHtml(data.content)}</code></pre>
+          <div id="file-html-live-view" class="file-html-frame-box">
+            <iframe sandbox="allow-scripts allow-same-origin" srcdoc="${escapeHtml(data.content)}" class="file-html-iframe"></iframe>
+          </div>
+          <div id="file-html-code-view" class="file-code-box hidden">
+            <pre><code class="language-html">${escapeHtml(data.content)}</code></pre>
+          </div>
         `;
-      }
 
-      if (typeof hljs !== 'undefined') {
-        fileModalBody.querySelectorAll('pre code').forEach((block) => hljs.highlightElement(block));
+        const tabLive = document.getElementById('btn-html-tab-live');
+        const tabCode = document.getElementById('btn-html-tab-code');
+        const viewLive = document.getElementById('file-html-live-view');
+        const viewCode = document.getElementById('file-html-code-view');
+
+        if (tabLive && tabCode && viewLive && viewCode) {
+          tabLive.addEventListener('click', () => {
+            tabLive.classList.add('active');
+            tabCode.classList.remove('active');
+            viewLive.classList.remove('hidden');
+            viewCode.classList.add('hidden');
+          });
+          tabCode.addEventListener('click', () => {
+            tabCode.classList.add('active');
+            tabLive.classList.remove('active');
+            viewCode.classList.remove('hidden');
+            viewLive.classList.add('hidden');
+            if (typeof hljs !== 'undefined') {
+              viewCode.querySelectorAll('pre code').forEach((b) => hljs.highlightElement(b));
+            }
+          });
+        }
+      } else {
+        // JS, TS, JSON, Python, CSS, etc.
+        let displayCode = data.content || '';
+        if (ext === '.json' || ext === '.jsonc') {
+          try { displayCode = JSON.stringify(JSON.parse(data.content), null, 2); } catch (e) {}
+        }
+
+        const langMap = {
+          '.js': 'javascript', '.jsx': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
+          '.ts': 'typescript', '.tsx': 'typescript',
+          '.json': 'json', '.json5': 'json', '.jsonc': 'json',
+          '.py': 'python', '.pyw': 'python',
+          '.css': 'css', '.scss': 'css', '.less': 'css',
+          '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
+          '.sql': 'sql', '.rs': 'rust', '.go': 'go',
+          '.yaml': 'yaml', '.yml': 'yaml', '.toml': 'toml', '.xml': 'xml', '.svg': 'xml'
+        };
+        const lang = langMap[ext] || 'plaintext';
+
+        fileModalBody.innerHTML = `
+          <div class="file-preview-banner">
+            <span>💻 代码语法高亮引擎 (${lang.toUpperCase()})</span>
+            <div class="file-banner-actions">
+              <span class="file-size-tag">${displayCode.length} 字符</span>
+              <button type="button" class="btn-copy-file-text" onclick="copyFileModalContent()">复制全文</button>
+            </div>
+          </div>
+          <div class="file-code-box">
+            <pre><code class="language-${lang}">${escapeHtml(displayCode)}</code></pre>
+          </div>
+        `;
+
+        if (typeof hljs !== 'undefined') {
+          fileModalBody.querySelectorAll('pre code').forEach((block) => hljs.highlightElement(block));
+        }
       }
     } else {
       fileModalBody.innerHTML = `<div class="approval-alert">❌ 无法读取该文件: ${escapeHtml(data.error || '文件不存在或无法访问')}</div>`;
     }
   } catch (err) {
     fileModalBody.innerHTML = `<div class="approval-alert">❌ 网络加载异常: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+window.copyFileModalContent = function() {
+  if (lastFileMeta && lastFileMeta.content) {
+    navigator.clipboard.writeText(lastFileMeta.content).then(() => {
+      showToast('✓ 文件内容已复制到剪贴板');
+    }).catch(() => {
+      showToast('复制失败，请手动选取文本');
+    });
   }
 };
 
@@ -3468,14 +3780,80 @@ document.addEventListener('click', (e) => {
       applySlashItem(actionEl.dataset.cmd);
     } else if (action === 'copy-code') {
       window.copyCodeBlock(actionEl);
+    } else if (action === 'toggle-command-card') {
+      const card = actionEl.closest('.command-card');
+      if (card) {
+        const body = card.querySelector('.command-card-body');
+        const arrow = card.querySelector('.command-card-arrow');
+        if (body) {
+          const isHidden = body.classList.contains('hidden');
+          body.classList.toggle('hidden', !isHidden);
+          card.classList.toggle('collapsed', !isHidden);
+          if (arrow) arrow.textContent = isHidden ? '▴' : '▾';
+        }
+      }
+    } else if (action === 'toggle-command-group') {
+      const group = actionEl.closest('.command-group');
+      if (group) {
+        const children = group.querySelector('.command-group-children');
+        const arrow = group.querySelector('.command-group-arrow');
+        if (children) {
+          const isHidden = children.classList.contains('hidden');
+          children.classList.toggle('hidden', !isHidden);
+          group.classList.toggle('collapsed', !isHidden);
+          if (arrow) arrow.textContent = isHidden ? '▴' : '▾';
+        }
+      }
     }
     return;
   }
 
-  const fileLink = e.target.closest('[data-file-path]');
+  const fileLink = e.target.closest('a');
   if (fileLink) {
-    e.preventDefault();
-    openFileModal(fileLink.dataset.filePath);
+    const href = fileLink.getAttribute('href') || '';
+    const filePath = fileLink.dataset.filePath || '';
+    if (!filePath && (!href || href.startsWith('/') || href.startsWith('http://') || href.startsWith('https://') || href.startsWith('#') || href.startsWith('javascript:'))) {
+      return;
+    }
+    const target = filePath || href;
+    if (target) {
+      e.preventDefault();
+      openFileModal(resolveFileRef(target));
+    }
+  }
+});
+
+document.addEventListener('dblclick', (e) => {
+  // 1. Double-click on user prompt card / wrapper to toggle fold
+  const userCard = e.target.closest('.message-card.role-user');
+  if (userCard) {
+    const btn = userCard.querySelector('.btn-toggle-prompt');
+    if (btn) {
+      toggleUserPrompt(btn);
+      return;
+    }
+  }
+
+  // 2. Double-click on assistant flow block / long message to toggle fold
+  const assistantBlock = e.target.closest('.assistant-flow-block, .message-card.role-assistant');
+  if (assistantBlock) {
+    const isVeryLong = assistantBlock.scrollHeight > 360 || assistantBlock.innerText.length > 500;
+    if (isVeryLong || assistantBlock.classList.contains('collapsed-long-msg')) {
+      const isCollapsed = assistantBlock.classList.toggle('collapsed-long-msg');
+      let bar = assistantBlock.querySelector('.assistant-collapse-hint');
+      if (isCollapsed) {
+        if (!bar) {
+          bar = document.createElement('div');
+          bar.className = 'assistant-collapse-hint';
+          bar.textContent = '已折叠长消息（双击展开 ˅）';
+          assistantBlock.appendChild(bar);
+        } else {
+          bar.classList.remove('hidden');
+        }
+      } else if (bar) {
+        bar.classList.add('hidden');
+      }
+    }
   }
 });
 
@@ -3808,6 +4186,61 @@ function renderSlashMenu() {
   slashMenu.classList.remove('hidden');
 }
 
+const goalOverlay = document.getElementById('goal-overlay');
+const goalInput = document.getElementById('goal-input');
+const btnCloseGoal = document.getElementById('btn-close-goal');
+const btnSaveGoal = document.getElementById('btn-save-goal');
+const btnClearGoal = document.getElementById('btn-clear-goal');
+
+function fillGoalEditor(goal) {
+  if (!goalInput) return;
+  goalInput.value = (goal && goal.objective) || '';
+}
+
+function hideGoalEditor() {
+  if (goalOverlay) goalOverlay.classList.add('hidden');
+}
+
+async function openGoalEditor() {
+  if (!currentThreadId) {
+    showGestureToast('先打开一个会话');
+    return;
+  }
+  if (goalOverlay) goalOverlay.classList.remove('hidden');
+  fillGoalEditor(null);
+  try {
+    const res = await apiFetch('/api/thread-goal?threadId=' + encodeURIComponent(currentThreadId));
+    const json = await readJson(res);
+    if (json && json.goal) fillGoalEditor(json.goal);
+  } catch {
+    sendApp({ type: 'get_goal', threadId: currentThreadId });
+  }
+  if (goalInput) goalInput.focus();
+}
+
+async function saveGoal(objective) {
+  if (!currentThreadId) return;
+  try {
+    const res = await apiFetch('/api/thread-goal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threadId: currentThreadId, objective }),
+    });
+    const json = await readJson(res);
+    if (!res.ok) throw new Error((json && json.error) || '保存失败');
+    fillGoalEditor(json.goal);
+  } catch {
+    sendApp({ type: 'set_goal', threadId: currentThreadId, objective });
+  }
+  hideGoalEditor();
+  showGestureToast(objective ? '目标已保存' : '已清除目标');
+}
+
+if (btnCloseGoal) btnCloseGoal.addEventListener('click', hideGoalEditor);
+if (goalOverlay) goalOverlay.addEventListener('click', (e) => { if (e.target === goalOverlay) hideGoalEditor(); });
+if (btnSaveGoal) btnSaveGoal.addEventListener('click', () => { void saveGoal((goalInput && goalInput.value) || ''); });
+if (btnClearGoal) btnClearGoal.addEventListener('click', () => { void saveGoal(''); });
+
 function applySlashItem(cmd) {
   const item = SLASH_ITEMS.find((row) => row.cmd === cmd);
   hideSlashMenu();
@@ -3830,6 +4263,11 @@ function applySlashItem(cmd) {
     const btnMcp = document.getElementById('btn-mcp');
     if (btnMcp) btnMcp.click();
     else if (mcpPopup) mcpPopup.classList.remove('hidden');
+    return;
+  }
+  if (item.kind === 'goal') {
+    if (msgInput) msgInput.value = '';
+    void openGoalEditor();
     return;
   }
   if (msgInput) msgInput.value = item.cmd;

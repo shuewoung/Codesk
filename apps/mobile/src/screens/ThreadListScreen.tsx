@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { EmptyState, ErrorBanner } from '../components/ui';
+import { EmptyState, ErrorBanner, FolderOutlineIcon } from '../components/ui';
 import { useSession } from '../session';
 import { radius, space } from '../theme';
 import { useTheme } from '../theme-context';
@@ -29,10 +29,39 @@ export function ThreadListScreen({
   selectedId?: string;
 }) {
   const session = useSession();
-  const { colors } = useTheme();
+  const { colors, listDensity } = useTheme();
+  const compact = listDensity === 'compact';
   const [query, setQuery] = useState('');
   const [openProjects, setOpenProjects] = useState<Record<string, boolean>>({});
   const [refreshing, setRefreshing] = useState(false);
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [newProjectPath, setNewProjectPath] = useState('');
+  const [newProjectError, setNewProjectError] = useState('');
+
+  function suggestProjectPath() {
+    const cwd = session.projects.map((p) => p.cwd).find(Boolean) || '';
+    const raw = String(cwd).replace(/[\\/]+$/, '');
+    if (!raw) return '';
+    const sep = raw.includes('/') && !raw.includes('\\') ? '/' : '\\';
+    const parent = raw.replace(/[\\/][^\\/]+$/, '');
+    return parent ? `${parent}${sep}` : '';
+  }
+
+  function openNewProject() {
+    setNewProjectError('');
+    setNewProjectPath(suggestProjectPath());
+    setNewProjectOpen(true);
+  }
+
+  function submitNewProject() {
+    const cwd = newProjectPath.trim();
+    if (!cwd) {
+      setNewProjectError('请填写项目文件夹路径');
+      return;
+    }
+    setNewProjectOpen(false);
+    session.createThread(cwd);
+  }
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -94,12 +123,23 @@ export function ThreadListScreen({
             {session.connText}
           </Text>
         </View>
-        <View style={{ flexDirection: 'row', gap: 14 }}>
-          <Pressable onPress={() => session.refreshThreads()} hitSlop={10}>
-            <Text style={{ color: colors.text, fontSize: 16 }}>刷新</Text>
+        <View style={styles.topActions}>
+          <Pressable
+            onPress={() => session.createThread()}
+            style={[styles.newBtn, { backgroundColor: colors.text }]}
+            hitSlop={8}
+          >
+            <Text style={{ color: colors.bg, fontSize: 12.5, fontWeight: '700' }}>＋ 对话</Text>
           </Pressable>
-          <Pressable onPress={onSettings} hitSlop={10}>
-            <Text style={{ color: colors.text, fontSize: 18 }}>⋯</Text>
+          <Pressable
+            onPress={openNewProject}
+            style={[styles.newBtn, { backgroundColor: colors.shell }]}
+            hitSlop={8}
+          >
+            <Text style={{ color: colors.text, fontSize: 12.5, fontWeight: '600' }}>＋ 项目</Text>
+          </Pressable>
+          <Pressable onPress={onSettings} hitSlop={10} style={styles.iconBtn}>
+            <Text style={{ color: colors.muted, fontSize: 16 }}>⋯</Text>
           </Pressable>
         </View>
       </View>
@@ -117,6 +157,18 @@ export function ThreadListScreen({
       {empty && !session.threads.length ? (
         <View style={{ paddingHorizontal: space.md, gap: 12 }}>
           <EmptyState title={empty.title} detail={empty.detail} />
+          <Pressable
+            onPress={() => session.createThread()}
+            style={[styles.connectBtn, { backgroundColor: colors.text }]}
+          >
+            <Text style={{ color: colors.bg, fontWeight: '700', fontSize: 16 }}>＋ 新建对话</Text>
+          </Pressable>
+          <Pressable
+            onPress={openNewProject}
+            style={[styles.connectBtn, { backgroundColor: colors.shell }]}
+          >
+            <Text style={{ color: colors.text, fontWeight: '700', fontSize: 16 }}>＋ 新建项目</Text>
+          </Pressable>
           <Pressable
             onPress={() => { void session.logout(); }}
             style={[styles.connectBtn, { backgroundColor: colors.shell }]}
@@ -151,6 +203,7 @@ export function ThreadListScreen({
               selectedId={selectedId}
               onToggle={() => toggle(p.name)}
               onOpenThread={onOpenThread}
+              onCreateThread={(cwd) => session.createThread(cwd)}
             />
           ))}
           {pinnedThreads.map((t) => (
@@ -166,6 +219,7 @@ export function ThreadListScreen({
               selectedId={selectedId}
               onToggle={() => toggle(p.name)}
               onOpenThread={onOpenThread}
+              onCreateThread={(cwd) => session.createThread(cwd)}
             />
           ))}
 
@@ -184,6 +238,35 @@ export function ThreadListScreen({
           style={[styles.search, { backgroundColor: colors.shell, color: colors.text }]}
         />
       </View>
+      {newProjectOpen ? (
+        <View style={styles.projectMask}>
+          <View style={[styles.projectCard, { backgroundColor: colors.bg, borderColor: colors.line }]}>
+            <Text style={{ color: colors.text, fontSize: 17, fontWeight: '700' }}>新建项目</Text>
+            <Text style={{ color: colors.muted, fontSize: 13, lineHeight: 18 }}>
+              填写电脑上的文件夹路径。不存在会自动创建，并在里面开一个新对话。
+            </Text>
+            <TextInput
+              value={newProjectPath}
+              onChangeText={(v) => { setNewProjectPath(v); setNewProjectError(''); }}
+              placeholder="D:\projects\my-app"
+              placeholderTextColor={colors.muted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              style={[styles.projectInput, { backgroundColor: colors.shell, color: colors.text, borderColor: colors.line }]}
+              onSubmitEditing={submitNewProject}
+            />
+            {newProjectError ? <Text style={{ color: colors.danger, fontSize: 12 }}>{newProjectError}</Text> : null}
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 12 }}>
+              <Pressable onPress={() => setNewProjectOpen(false)} hitSlop={8}>
+                <Text style={{ color: colors.muted, fontSize: 15 }}>取消</Text>
+              </Pressable>
+              <Pressable onPress={submitNewProject} hitSlop={8}>
+                <Text style={{ color: colors.text, fontSize: 15, fontWeight: '700' }}>创建</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -194,22 +277,55 @@ function ProjectBlock({
   selectedId,
   onToggle,
   onOpenThread,
+  onCreateThread,
 }: {
   project: Project;
   open: boolean;
   selectedId?: string;
   onToggle: () => void;
   onOpenThread: (id: string) => void;
+  onCreateThread: (cwd?: string) => void;
 }) {
   const { colors } = useTheme();
+
+  const workingCount = project.threads.filter((t) => t.isActive || t.status === 'working' || t.working).length;
+  const waitingCount = project.threads.filter((t) => t.needsApproval || t.status === 'waiting_approval').length;
+  const justFinishedCount = project.threads.filter(
+    (t) => !t.isActive && t.status !== 'working' && !t.working && !t.needsApproval && t.status !== 'waiting_approval' && (Date.now() - (t.mtimeMs || 0) < 60000)
+  ).length;
+
   return (
-    <View style={[styles.projectCard, { backgroundColor: colors.shell }]}>
-      <Pressable onPress={onToggle} style={styles.folder}>
-        <Text style={{ color: colors.text, fontSize: 16, fontWeight: '700' }}>
-          {open ? '▾' : '▸'}  项目  {project.name}
-        </Text>
-        <Text style={{ color: colors.muted, fontSize: 12 }}>{project.threads.length} 个会话</Text>
-      </Pressable>
+    <View style={styles.projectGroup}>
+      <View style={styles.folder}>
+        <Pressable onPress={onToggle} style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+          <FolderOutlineIcon open={open} color={colors.muted} size={15} />
+          <Text style={{ color: colors.text, fontSize: 14.5, fontWeight: '600', flex: 1, marginLeft: 6 }} numberOfLines={1}>
+            {project.name}
+          </Text>
+          {workingCount > 0 ? (
+            <View style={styles.badgeWorking}>
+              <View style={[styles.dot, { backgroundColor: '#22c55e', width: 5, height: 5 }]} />
+              <Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '700' }}>{workingCount}</Text>
+            </View>
+          ) : waitingCount > 0 ? (
+            <View style={styles.badgeWaiting}>
+              <Text style={{ color: '#ea580c', fontSize: 11, fontWeight: '700' }}>✋ {waitingCount}</Text>
+            </View>
+          ) : justFinishedCount > 0 ? (
+            <View style={styles.badgeFinished}>
+              <Text style={{ color: '#0d9488', fontSize: 11, fontWeight: '700' }}>✓ {justFinishedCount}</Text>
+            </View>
+          ) : null}
+          <Text style={{ color: colors.muted, fontSize: 12, marginLeft: 4, marginRight: 4 }}>{project.threads.length}</Text>
+        </Pressable>
+        <Pressable
+          onPress={() => onCreateThread(project.cwd || '')}
+          hitSlop={10}
+          style={styles.projectNewBtn}
+        >
+          <Text style={{ color: colors.text, fontSize: 16, fontWeight: '700' }}>+</Text>
+        </Pressable>
+      </View>
       {open
         ? project.threads.map((t) => (
             <ThreadLine key={t.id} thread={t} selected={t.id === selectedId} indent onPress={() => onOpenThread(t.id)} />
@@ -233,15 +349,41 @@ function ThreadLine({
   onPress: () => void;
 }) {
   const { colors } = useTheme();
+  const isWorking = thread.isActive || thread.status === 'working' || thread.working;
+  const isWaiting = thread.needsApproval || thread.status === 'waiting_approval';
+  const isJustFinished = !isWorking && !isWaiting && (Date.now() - (thread.mtimeMs || 0) < 60000);
+
   return (
     <Pressable
       onPress={onPress}
-      style={[styles.row, indent && styles.indent, selected && { backgroundColor: colors.shell }]}
+      style={[styles.row, indent && styles.indent, selected && { backgroundColor: colors.card }]}
     >
-      <Text style={[styles.title, { color: colors.text }]} numberOfLines={1}>
-        {thread.needsApproval ? '等待批准 · ' : ''}{thread.title || '新聊天'}
-      </Text>
-      {showTime ? <Text style={{ color: colors.muted, fontSize: 12 }}>{relTime(thread.mtimeMs, thread.updatedAt)}</Text> : null}
+      <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1, gap: 6 }}>
+        {isWorking ? (
+          <View style={[styles.dot, { backgroundColor: '#22c55e', width: 7, height: 7 }]} />
+        ) : isWaiting ? (
+          <View style={[styles.dot, { backgroundColor: '#ea580c', width: 7, height: 7 }]} />
+        ) : null}
+        <Text style={[styles.title, { color: colors.text, fontWeight: selected ? '600' : '400' }]} numberOfLines={1}>
+          {thread.title || '新聊天'}
+        </Text>
+      </View>
+
+      {isWorking ? (
+        <View style={styles.badgeWorking}>
+          <Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '700' }}>运行中</Text>
+        </View>
+      ) : isWaiting ? (
+        <View style={styles.badgeWaiting}>
+          <Text style={{ color: '#ea580c', fontSize: 11, fontWeight: '700' }}>需批准</Text>
+        </View>
+      ) : isJustFinished ? (
+        <View style={styles.badgeFinished}>
+          <Text style={{ color: '#0d9488', fontSize: 11, fontWeight: '700' }}>✓ 刚刚</Text>
+        </View>
+      ) : showTime ? (
+        <Text style={{ color: colors.muted, fontSize: 12 }}>{relTime(thread.mtimeMs, thread.updatedAt)}</Text>
+      ) : null}
     </Pressable>
   );
 }
@@ -254,30 +396,67 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: space.md,
     paddingVertical: space.sm,
+    gap: 8,
   },
-  hostRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 },
+  hostRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },
+  topActions: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },
   dot: { width: 8, height: 8, borderRadius: 4 },
   host: { fontSize: 14, fontWeight: '600' },
+  iconBtn: {
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   list: { paddingBottom: 80 },
-  section: { fontSize: 13, paddingHorizontal: space.md, paddingTop: 16, paddingBottom: 6 },
-  projectCard: { marginHorizontal: 12, marginBottom: 8, borderRadius: 12, overflow: 'hidden' },
+  section: { fontSize: 12.5, fontWeight: '600', paddingHorizontal: space.md, paddingTop: 14, paddingBottom: 4 },
+  projectGroup: { marginBottom: 1 },
   folder: {
     paddingHorizontal: space.md,
-    paddingVertical: 12,
+    paddingVertical: 7,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    borderRadius: 8,
   },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: space.md,
-    paddingVertical: 12,
+    paddingVertical: 7,
     gap: 8,
+    borderRadius: 8,
   },
-  indent: { paddingLeft: 36 },
-  title: { flex: 1, fontSize: 16 },
+  indent: { paddingLeft: 34 },
+  title: { flex: 1, fontSize: 14.5 },
+  badgeWorking: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(34, 197, 94, 0.12)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  badgeWaiting: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(234, 88, 12, 0.12)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  badgeFinished: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: 'rgba(13, 148, 136, 0.12)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
   bottom: { padding: space.md },
   search: { borderRadius: radius.pill, paddingHorizontal: 16, paddingVertical: 12, fontSize: 15 },
   connectBtn: {
@@ -286,5 +465,45 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     paddingVertical: 14,
     alignItems: 'center',
+  },
+  newBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  projectNewBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 6,
+    minWidth: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  projectNewBtnCompact: {
+    paddingHorizontal: 4,
+    paddingVertical: 0,
+    minWidth: 16,
+  },
+  projectMask: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.28)',
+    justifyContent: 'center',
+    padding: 20,
+    zIndex: 20,
+  },
+  projectCard: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 16,
+    gap: 10,
+  },
+  projectInput: {
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
   },
 });

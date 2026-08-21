@@ -138,6 +138,30 @@ function patchStats(text: string): { add: number; del: number; path: string } {
   return { add, del, path };
 }
 
+export function extractActualCommand(raw: unknown): string {
+  if (!raw) return '';
+  const str = String(raw).trim();
+  const m = str.match(/tools\.(?:exec_command|exec)\(\s*\{[\s\S]*?cmd\s*:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/i);
+  if (m) {
+    let inner = m[1] || m[2] || '';
+    try {
+      inner = JSON.parse(`"${inner}"`);
+    } catch {
+      inner = inner.replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+    }
+    return inner.trim();
+  }
+  if (str.startsWith('{') && str.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(str) as { cmd?: string; command?: string };
+      if (parsed && (parsed.cmd || parsed.command)) return String(parsed.cmd || parsed.command).trim();
+    } catch {
+      /* ignore */
+    }
+  }
+  return str;
+}
+
 export function flattenItems(items: HistoryItem[]): TimelineNode[] {
   const out: TimelineNode[] = [];
   let n = 0;
@@ -158,6 +182,22 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
       const text = cleanVisibleText(itemText(item));
       if (!text) continue;
       if (role === 'user') {
+        const trimmed = text.trim();
+        const isSubagentCallback = trimmed.includes('"agent_path":') || trimmed.includes('"agent_path"') || (trimmed.startsWith('{') && (trimmed.includes('"completed"') || trimmed.includes('"status"') || trimmed.includes('"cell_id"')));
+        if (isSubagentCallback) {
+          let completedText = '';
+          try {
+            const parsed = JSON.parse(trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')) as Record<string, unknown>;
+            const statusObj = parsed && typeof parsed.status === 'object' ? (parsed.status as Record<string, unknown>) : null;
+            completedText = String(statusObj?.completed || parsed?.completed || parsed?.output || '');
+          } catch {}
+          if (completedText && typeof completedText === 'string') {
+            const last = out[out.length - 1];
+            if (last && last.kind === 'assistant') last.text = `${last.text}\n\n${completedText}`;
+            else out.push({ id: `assistant-${n++}`, kind: 'assistant', text: completedText });
+          }
+          continue;
+        }
         out.push({ id: `user-${n++}`, kind: 'user', text });
       } else {
         const last = out[out.length - 1];
@@ -171,7 +211,7 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
       out.push({
         id: `agent-${n++}`,
         kind: 'system',
-        text: name ? `${name} 已更新` : '子智能体已更新',
+        text: name ? `🤖 ${name} 已更新` : '🤖 子智能体已更新',
       });
       continue;
     }
@@ -181,6 +221,37 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
     }
     const args = parseArgs(item);
     const toolName = String(item.name || item.tool || '');
+    const rawCmd = typeof args?.cmd === 'string'
+      ? args.cmd
+      : typeof args?.command === 'string'
+        ? args.command
+        : typeof item.input === 'string'
+          ? item.input
+          : '';
+
+    // Multi-agent spawn / close / wait detection
+    if (toolName.includes('spawn_agent') || rawCmd.includes('spawn_agent')) {
+      out.push({ id: `agent-spawn-${n++}`, kind: 'system', text: '已创建 1 个智能体' });
+      continue;
+    }
+    if (toolName.includes('close_agent') || rawCmd.includes('close_agent')) {
+      out.push({ id: `agent-close-${n++}`, kind: 'system', text: '已关闭 1 个智能体' });
+      continue;
+    }
+    if (toolName.includes('wait_agent') || rawCmd.includes('wait_agent') || toolName === 'wait') {
+      continue; // suppress wait noise
+    }
+    if (toolName.includes('skill') || rawCmd.includes('SKILL.md') || rawCmd.includes('short-drama-factory') || (typeof args?.path === 'string' && args.path.includes('skill'))) {
+      let skillName = '';
+      const m = rawCmd.match(/([a-zA-Z0-9_-]+)[\\/]SKILL\.md/i) || rawCmd.match(/skill[s]?[\\/]([a-zA-Z0-9_-]+)/i) || rawCmd.match(/short-drama-factory/i);
+      if (m) {
+        const captured = m[0].includes('short-drama-factory') ? 'Short Drama Factory' : m[1];
+        if (captured && captured.toLowerCase() !== 'skill') skillName = captured;
+      }
+      out.push({ id: `skill-${n++}`, kind: 'system', text: skillName ? `已读取 ${skillName} 技能` : '已读取技能' });
+      continue;
+    }
+
     const isDiff =
       type === 'fileChange' ||
       type === 'file_change' ||
@@ -203,14 +274,13 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
       continue;
     }
     if (type === 'custom_tool_call' || type === 'tool_call' || type === 'function_call') {
-      const cmd = typeof args?.cmd === 'string'
-        ? args.cmd
-        : typeof args?.command === 'string'
-          ? args.command
-          : '';
-      const label = toolName === 'exec_command' || cmd
-        ? (cmd || '命令').replace(/[\r\n]+/g, ' ').slice(0, 80)
-        : toolName.replace(/_/g, ' ') || '命令';
+      const actual = extractActualCommand(rawCmd);
+      let firstLine = actual.split(/[\r\n]+/)[0].trim().replace(/^\$\s*/, '');
+      if (firstLine.startsWith('const r = await tools.')) {
+        firstLine = firstLine.replace(/^const r = await tools\.[a-zA-Z0-9_]+\(\{?/, '').trim();
+      }
+      if (firstLine.length > 70) firstLine = firstLine.slice(0, 67) + '...';
+      const label = firstLine ? `exec ${firstLine}` : '运行了命令';
       out.push({
         id: `cmd-${n++}`,
         kind: 'command',
@@ -260,6 +330,40 @@ export function approvalFromHistory(threadId: string, history?: ThreadHistory): 
     at: typeof pending.at === 'number' ? pending.at : undefined,
     source: 'history',
   };
+}
+
+export type CommandGroup = {
+  kind: 'cmd-group';
+  id: string;
+  commands: TimelineNode[];
+};
+
+export type FeedNode = TimelineNode | CommandGroup;
+
+export function groupCommandNodes(nodes: TimelineNode[]): FeedNode[] {
+  const out: FeedNode[] = [];
+  for (const n of nodes) {
+    if (n.kind !== 'command') {
+      out.push(n);
+      continue;
+    }
+    const last = out[out.length - 1];
+    if (last && last.kind === 'cmd-group') {
+      last.commands.push(n);
+    } else {
+      out.push({ kind: 'cmd-group', id: `g-${n.id}`, commands: [n] });
+    }
+  }
+  return out;
+}
+
+export function commandGroupCounts(commands: TimelineNode[]): { label: string; count: number }[] {
+  const map = new Map<string, number>();
+  for (const c of commands) {
+    const label = String(c.text || 'exec').split('\n')[0].trim() || 'exec';
+    map.set(label, (map.get(label) || 0) + 1);
+  }
+  return [...map.entries()].map(([label, count]) => ({ label, count }));
 }
 
 export function approvalFromMessage(msg: Record<string, unknown>): Approval | null {

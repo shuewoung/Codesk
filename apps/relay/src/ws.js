@@ -320,6 +320,8 @@ export function attachWs(server, { store, audit, net, config, pairLimiter, pushL
           title: payload.title,
           body: payload.body,
           tag: payload.tag,
+          url: payload.url,
+          threadId: payload.threadId,
           fetchImpl: config.jpushFetch
         });
         audit.write('push_send', { hubId: meta.hubId, n: result.n || 0, ok: result.ok, ip });

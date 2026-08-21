@@ -64,7 +64,7 @@ PWA 已冻结在 `pwa-stable` / `master`（`a562688`）。本窗口只在 `feat/
   - **出门**：出门码或扫右边二维码 → `pair`（`POST {RELAY_URL}/api/relay/pair`）
 - 相机只扫出门 QR：`http(s)://<中继>/?pair=<code>&hk=<hubE2ePub>&lan=...`
 - 成功：LAN session 或 `deviceToken` + `hubId` 写入 SecureStore。状态文案写「家里直连」或「中继已连接」
-- 失败：明确文案，不要白屏。不要做成一个 6 位框两用
+- 失败：明确文案，不要白屏。不要做成一个框两用
 
 ### 3. 连接
 

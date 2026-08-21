@@ -78,6 +78,7 @@ const KEY_RELAY = 'onedesk.relayUrl';
 const KEY_TOKEN = 'onedesk.deviceToken';
 const KEY_HUB = 'onedesk.hubId';
 const KEY_THEME = 'onedesk.theme';
+const KEY_DENSITY = 'onedesk.listDensity';
 const KEY_HK = 'onedesk.hubE2ePub';
 const KEY_DEV = 'onedesk.e2eDevice';
 const KEY_CK = 'onedesk.contentKey';
@@ -191,6 +192,17 @@ export async function loadTheme(): Promise<ThemeName> {
 
 export async function saveTheme(name: ThemeName): Promise<void> {
   await kvSet(KEY_THEME, name);
+}
+
+export type ListDensity = 'compact' | 'comfortable';
+
+export async function loadListDensity(): Promise<ListDensity> {
+  const value = await kvGet(KEY_DENSITY);
+  return value === 'comfortable' ? 'comfortable' : 'compact';
+}
+
+export async function saveListDensity(name: ListDensity): Promise<void> {
+  await kvSet(KEY_DENSITY, name);
 }
 
 const KEY_PINS = 'onedesk.pins';

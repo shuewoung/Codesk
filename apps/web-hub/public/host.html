@@ -56,6 +56,14 @@
       margin:8px 0 2px; cursor:pointer; user-select:all;
     }
     .code:hover { color:var(--accent); }
+    .lan-actions { display:flex; gap:8px; margin:8px 0 4px; }
+    .lan-edit { display:flex; gap:8px; margin:8px 0 4px; align-items:center; }
+    .lan-edit[hidden] { display:none; }
+    .lan-edit input {
+      width:7.5em; min-height:36px; padding:0 10px; border:1px solid var(--line); border-radius:12px;
+      font-family:Consolas, ui-monospace, monospace; font-size:18px; letter-spacing:.18em;
+      text-transform:uppercase; text-align:center; background:#fff; color:var(--ink);
+    }
     .qr-wrap { display:grid; place-items:center; margin:14px 0 8px; }
     .qr {
       width:196px; height:196px; display:grid; place-items:center;
@@ -122,11 +130,19 @@
         <div class="card-head">
           <div>
             <h2>家里 WiFi</h2>
-            <p class="hint">常驻码。手机和电脑在同一个局域网时用这个，不经过中继。</p>
+            <p class="hint">常驻 4 位码，可自己设。同一 WiFi 用这个，不经过中继。</p>
           </div>
         </div>
         <div class="tag">家里码 · 点击复制</div>
         <div id="lan-code" class="code">……</div>
+        <div class="lan-actions">
+          <button type="button" class="ghost" id="btn-lan-set">自己设</button>
+          <button type="button" class="ghost" id="btn-lan-regen">换一个</button>
+        </div>
+        <div id="lan-edit" class="lan-edit" hidden>
+          <input id="lan-code-input" maxlength="4" placeholder="4 位" autocomplete="off" spellcheck="false">
+          <button type="button" class="primary" id="btn-lan-save">保存</button>
+        </div>
         <div class="qr-wrap"><div id="lan-qr" class="qr"></div></div>
         <div id="lan-main" class="meta"></div>
         <div id="lan-urls" class="urls"></div>
@@ -292,6 +308,46 @@
     }
     $('lan-code').addEventListener('click', () => copyText($('lan-code').textContent));
     $('pair-code').addEventListener('click', () => copyText($('pair-code').textContent));
+    async function setLanCode(code) {
+      const res = await fetch('/api/host/lan-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(code ? { code } : {}),
+      });
+      const json = await readJson(res);
+      if (!res.ok || !json || !json.lanCode) {
+        toast((json && json.error) || '家里码没改成');
+        return;
+      }
+      $('lan-code').textContent = json.lanCode;
+      $('lan-edit').hidden = true;
+      toast(code ? '已设家里码' : '已换家里码');
+    }
+    $('btn-lan-set').addEventListener('click', () => {
+      const box = $('lan-edit');
+      box.hidden = !box.hidden;
+      if (!box.hidden) {
+        const cur = $('lan-code').textContent.trim();
+        $('lan-code-input').value = /^[0-9A-Za-z]{4}$/.test(cur) ? cur : '';
+        $('lan-code-input').focus();
+        $('lan-code-input').select();
+      }
+    });
+    $('btn-lan-save').addEventListener('click', () => {
+      const code = $('lan-code-input').value.trim();
+      if (!/^[0-9A-Za-z]{4}$/.test(code)) {
+        toast('家里码须为 4 位字母或数字');
+        return;
+      }
+      setLanCode(code);
+    });
+    $('lan-code-input').addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') $('btn-lan-save').click();
+    });
+    $('btn-lan-regen').addEventListener('click', () => {
+      if (!confirm('换一个新的 4 位家里码？已连上的手机不用重登。')) return;
+      setLanCode('');
+    });
     $('btn-qr').addEventListener('click', () => loadPair());
     $('btn-quit').addEventListener('click', async () => {
       if (!confirm('退出后手机连不上这台电脑。确定退出 Hub？')) return;

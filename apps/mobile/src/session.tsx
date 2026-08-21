@@ -32,18 +32,19 @@ import {
   type Envelope,
 } from './protocol';
 import { clearSession, loadDeviceKeys, loadIdSet, loadSession, saveDeviceKeys, saveIdSet, saveSession } from './storage';
-import type {
-  Approval,
-  ConnKind,
-  Decision,
-  FileData,
-  HubConfig,
-  ModelInfo,
-  Project,
-  Thread,
-  ThreadHistory,
-  TokenUsage,
-  TreeNode,
+import {
+  applyConfigPatch,
+  type Approval,
+  type ConnKind,
+  type Decision,
+  type FileData,
+  type HubConfig,
+  type ModelInfo,
+  type Project,
+  type Thread,
+  type ThreadHistory,
+  type TokenUsage,
+  type TreeNode,
 } from './types';
 
 type RNWebSocketOptions = { headers?: Record<string, string> };
@@ -104,6 +105,9 @@ type SessionValue = {
   requestTree: (threadId: string, cwd?: string) => void;
   uploadFile: (threadId: string, name: string, base64: string, mime?: string) => void;
   updateConfig: (key: string, value: string) => void;
+  goal: { threadId: string; objective: string } | null;
+  getGoal: (threadId: string) => void;
+  setGoal: (threadId: string, objective: string) => void;
   renameThread: (threadId: string, title: string) => void;
   togglePin: (threadId: string) => void;
   archiveThread: (threadId: string) => void;
@@ -138,6 +142,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     tree: [],
   });
   const [lastUpload, setLastUpload] = useState<{ path: string; name: string; error?: string | null } | null>(null);
+  const [goal, setGoalState] = useState<{ threadId: string; objective: string } | null>(null);
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
   const [archivedIds, setArchivedIds] = useState<string[]>([]);
   const [git, setGit] = useState<SessionValue['git']>(null);
@@ -225,13 +230,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const connText =
     conn === 'connected'
-      ? (mode === 'lan' ? '家里直连' : '中继已连接')
+      ? (mode === 'lan' ? '直连' : '中继')
       : conn === 'hub_offline'
-        ? '主机离线'
+        ? '离线'
         : conn === 'reconnecting'
-          ? '正在重连'
+          ? '重连中'
           : conn === 'connecting'
-            ? (mode === 'lan' ? '正在连家里' : '正在连中继')
+            ? '连接中'
             : paired
               ? '未连接'
               : '未配对';
@@ -309,6 +314,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     if (msg.type === 'config_data' && msg.data && typeof msg.data === 'object') {
       setConfig(msg.data as HubConfig);
       if (typeof msg.hostName === 'string' && msg.hostName.trim()) setHostName(msg.hostName.trim());
+      return;
+    }
+    if (msg.type === 'goal_data') {
+      const id = typeof msg.threadId === 'string' ? msg.threadId : '';
+      const raw = msg.goal && typeof msg.goal === 'object' ? (msg.goal as { objective?: string }) : null;
+      setGoalState(id ? { threadId: id, objective: String(raw?.objective || '') } : null);
       return;
     }
     if (msg.type === 'models_list' && Array.isArray(msg.models)) {
@@ -733,6 +744,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const pair = useCallback(async (codeOrUrl: string, relayOverride?: string) => {
     const parsed = extractPairFromInput(codeOrUrl);
+    if (!parsed.code) throw new Error('请对准右边的出门二维码，或手输入出门码。左边是家里地址，扫了没用。');
     const nextRelay = normalizeRelayUrl(relayOverride || parsed.relayUrl || credsRef.current.relayUrl);
     if (!nextRelay) throw new Error('请先填写中继地址');
     setError('');
@@ -912,9 +924,25 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     [sendApp],
   );
 
+  const getGoal = useCallback((id: string) => {
+    if (!id) return;
+    sendApp({ type: 'get_goal', threadId: id });
+  }, [sendApp]);
+
+  const setGoal = useCallback((id: string, objective: string) => {
+    if (!id) return;
+    setGoalState({ threadId: id, objective: String(objective || '') });
+    sendApp({ type: 'set_goal', threadId: id, objective });
+  }, [sendApp]);
+
   const updateConfig = useCallback(
     (key: string, value: string) => {
-      sendApp({ type: 'update_config', key, value });
+      const next = String(value || '').trim();
+      if (!key || !next) return;
+      setConfig((prev) => applyConfigPatch(prev, key, next));
+      if (!sendApp({ type: 'update_config', key, value: next })) {
+        setError('未连接，改不了设置');
+      }
     },
     [sendApp],
   );
@@ -1051,6 +1079,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       requestTree,
       uploadFile,
       updateConfig,
+      goal,
+      getGoal,
+      setGoal,
       renameThread,
       togglePin,
       archiveThread,
@@ -1105,6 +1136,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       requestTree,
       uploadFile,
       updateConfig,
+      goal,
+      getGoal,
+      setGoal,
       renameThread,
       togglePin,
       archiveThread,

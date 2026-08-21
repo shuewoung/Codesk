@@ -65,21 +65,31 @@ export function toWsUrl(relayUrl: string, token?: string): string {
   return url.toString();
 }
 
+function pairCodeFromText(text: string): string {
+  const match = String(text || '').match(/(?:[?&#](?:pair|code)=|pair=)([A-Za-z0-9]{4,12})/i);
+  return match ? match[1].toUpperCase() : '';
+}
+
 export function extractPairFromInput(input: string): { code: string; relayUrl?: string; hubE2ePub?: string; lanUrl?: string } {
-  const trimmed = String(input || '').trim();
+  const trimmed = String(input || '').trim().replace(/^URL:/i, '').trim();
   if (!trimmed) return { code: '' };
   try {
     const url = new URL(trimmed);
-    const code = (url.searchParams.get('pair') || url.searchParams.get('code') || '').trim();
+    const code = (url.searchParams.get('pair') || url.searchParams.get('code') || pairCodeFromText(trimmed) || '').trim().toUpperCase();
     const hubE2ePub = (url.searchParams.get('hk') || '').trim();
     const lanUrl = (url.searchParams.get('lan') || '').trim();
     if (code) {
       return { code, relayUrl: `${url.protocol}//${url.host}`, hubE2ePub, lanUrl };
     }
+    return { code: '', lanUrl: lanUrl || trimmed.replace(/\/$/, '') };
   } catch {
     /* raw code */
   }
-  return { code: trimmed };
+  const nested = pairCodeFromText(trimmed);
+  if (nested) return { code: nested };
+  const compact = trimmed.toUpperCase().replace(/[\s-]+/g, '');
+  if (/^[A-Z0-9]{4,12}$/.test(compact)) return { code: compact };
+  return { code: '' };
 }
 
 export function wrapFwd(hubId: string, payload: AppMessage): Envelope {

@@ -1,6 +1,64 @@
 import fs from 'node:fs';
 
 export const APPROVAL_TTL_MS = 10 * 60 * 1000;
+export const ACTIVE_FRESH_MS = 120 * 1000;
+
+export function threadLooksLive(tail, stats, now = Date.now()) {
+  if (!tail || !tail.open) return false;
+  const mtime = stats && Number(stats.mtimeMs);
+  return Number.isFinite(mtime) && now - mtime < ACTIVE_FRESH_MS;
+}
+
+export function hasOpenDelegatedAgent(openCalls) {
+  if (!openCalls || typeof openCalls.values !== 'function') return false;
+  for (const call of openCalls.values()) {
+    if (call && call.name === 'add_delegated_agent') return true;
+  }
+  return false;
+}
+
+export function resolveLiveStatus(parsedStatus, {
+  hasLiveChildren = false,
+  tail = null,
+  stats = null,
+  now = Date.now(),
+} = {}) {
+  if (parsedStatus === 'waiting_approval') return 'waiting_approval';
+  if (hasLiveChildren || threadLooksLive(tail, stats, now)) return 'working';
+  if (parsedStatus === 'working') return 'idle';
+  return parsedStatus || 'idle';
+}
+
+export function parseThreadSpawn(source) {
+  const src = String(source || '').trim();
+  if (!src) return null;
+  if (src.startsWith('{')) {
+    try {
+      const obj = JSON.parse(src);
+      const sub = obj && obj.subagent;
+      if (!sub) return null;
+      const spawn = sub.thread_spawn || {};
+      return {
+        kind: 'subagent',
+        parentThreadId: String(spawn.parent_thread_id || ''),
+        depth: Number(spawn.depth) || 0,
+      };
+    } catch {
+      /* fall through */
+    }
+  }
+  if (/subagent|thread_spawn|guardian/i.test(src)) return { kind: 'subagent', parentThreadId: '', depth: 0 };
+  return null;
+}
+
+export function isNonUserThreadRecord(threadSource, source) {
+  const ts = String(threadSource || '').trim().toLowerCase();
+  if (ts && ts !== 'user') return true;
+  const src = String(source || '').trim();
+  if (!src || src === 'vscode') return false;
+  if (src === 'exec') return true;
+  return Boolean(parseThreadSpawn(src)) || src !== 'vscode';
+}
 
 export function isApprovalExpired(pending, now = Date.now()) {
   if (!pending) return false;

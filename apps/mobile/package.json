@@ -35,7 +35,7 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/protocol.test.ts src/history.test.ts src/api.test.ts src/discover.test.ts test/relay-client.test.ts"
+    "test": "tsx --test src/protocol.test.ts src/history.test.ts src/api.test.ts src/discover.test.ts src/push.test.ts test/relay-client.test.ts"
   },
   "private": true
 }

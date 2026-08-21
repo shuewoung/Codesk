@@ -26,6 +26,9 @@ test('extractPairFromInput reads /?pair=', () => {
   assert.equal(withHk.hubE2ePub, 'abc');
   assert.equal(withHk.lanUrl, 'http://192.168.1.8:18990');
   assert.equal(extractPairFromInput('XYZ789').code, 'XYZ789');
+  assert.equal(extractPairFromInput('URL:https://relay.example.com/?pair=ab12cd').code, 'AB12CD');
+  assert.equal(extractPairFromInput('http://192.168.1.8:18990').code, '');
+  assert.equal(extractPairFromInput('http://192.168.1.8:18990/').lanUrl, 'http://192.168.1.8:18990');
 });
 
 test('toWsUrl maps scheme and token query', () => {

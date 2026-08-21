@@ -5,13 +5,14 @@ import { ErrorBanner, GhostButton, PrimaryButton } from '../components/ui';
 import { useSession } from '../session';
 import { radius, space } from '../theme';
 import { useTheme } from '../theme-context';
+import { ACCESS_MODES } from '../types';
 
-const CURRENT_VERSION = '1.0.6';
-const CURRENT_VERSION_CODE = 106;
+const CURRENT_VERSION = '1.0.10';
+const CURRENT_VERSION_CODE = 110;
 
 export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan: () => void }) {
   const session = useSession();
-  const { colors, theme, setTheme } = useTheme();
+  const { colors, theme, setTheme, listDensity, setListDensity } = useTheme();
   const [relayUrl, setRelayUrl] = useState(session.relayUrl);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -80,15 +81,27 @@ export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan:
           <Text style={{ color: colors.text }}>深色</Text>
         </Pressable>
       </View>
+      <Text style={[styles.label, { color: colors.muted }]}>会话列表</Text>
+      <View style={styles.row}>
+        <Pressable
+          style={[styles.chip, { borderColor: colors.line, backgroundColor: listDensity === 'compact' ? colors.card : 'transparent' }]}
+          onPress={() => setListDensity('compact')}
+        >
+          <Text style={{ color: colors.text }}>紧凑</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.chip, { borderColor: colors.line, backgroundColor: listDensity === 'comfortable' ? colors.card : 'transparent' }]}
+          onPress={() => setListDensity('comfortable')}
+        >
+          <Text style={{ color: colors.text }}>宽松</Text>
+        </Pressable>
+      </View>
       <Text style={[styles.label, { color: colors.muted }]}>访问权限</Text>
       <View style={styles.row}>
-        {[
-          ['ask', '请求批准'],
-          ['auto', '帮我批准'],
-          ['full', '完全访问'],
-        ].map(([id, label]) => (
+        {(Object.keys(ACCESS_MODES) as Array<keyof typeof ACCESS_MODES>).map((id) => (
           <Pressable
             key={id}
+            unstable_pressDelay={0}
             style={[
               styles.chip,
               {
@@ -98,14 +111,14 @@ export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan:
             ]}
             onPress={() => session.updateConfig('permission', id)}
           >
-            <Text style={{ color: colors.text }}>{label}</Text>
+            <Text style={{ color: colors.text }}>{ACCESS_MODES[id].icon} {ACCESS_MODES[id].label}</Text>
           </Pressable>
         ))}
       </View>
       <Text style={[styles.label, { color: colors.muted }]}>当前连接</Text>
       <Text style={{ color: colors.text, fontSize: 15 }}>
         {session.conn === 'connected'
-          ? (session.mode === 'lan' ? '家里直连' : '中继（出门）')
+          ? (session.mode === 'lan' ? '直连' : '中继')
           : session.connText}
       </Text>
       {session.mode === 'lan' && session.lanUrl ? (
@@ -139,7 +152,7 @@ export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan:
         }}
       />
       <Text style={[styles.label, { color: colors.muted }]}>版本与更新</Text>
-      <Text style={{ color: colors.text, fontSize: 13 }}>当前版本：v1.0.6</Text>
+      <Text style={{ color: colors.text, fontSize: 13 }}>当前版本：v{CURRENT_VERSION}</Text>
       {updateMsg ? <Text style={{ color: colors.muted, fontSize: 12 }}>{updateMsg}</Text> : null}
       <GhostButton
         label={checkingUpdate ? '正在检查更新...' : '检查版本更新'}

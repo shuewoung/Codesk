@@ -9,7 +9,7 @@ import { loadOrCreateIdentity } from '../../apps/web-hub/server/identity.js';
 import { runGitReadonly, spawnCommand } from '../../apps/web-hub/server/local-cmd.js';
 import { envelopeHasSecrets, toRelayWsUrl } from '../../apps/web-hub/server/relay-client.js';
 import { approvalMethodFromKind, buildApprovalParams } from '../../apps/web-hub/server/ipc-client.js';
-import { inspectTailLines } from '../../apps/web-hub/server/turn-status.js';
+import { inspectTailLines, threadLooksLive } from '../../apps/web-hub/server/turn-status.js';
 import { anonymousBox, anonymousOpen, generateKeyPair, generateSecret, secretOpen, secretSeal } from '../../apps/web-hub/server/e2e.js';
 
 const results = [];
@@ -159,6 +159,13 @@ await record('turn tail open if work continues after complete', () => {
     JSON.stringify({ type: 'event_msg', payload: { type: 'turn_started' } }),
   ];
   assert.equal(inspectTailLines(lines).open, true);
+});
+
+await record('live working requires open tail and fresh mtime', () => {
+  const now = 1_000_000;
+  assert.equal(threadLooksLive({ open: true }, { mtimeMs: now - 1_000 }, now), true);
+  assert.equal(threadLooksLive({ open: true }, { mtimeMs: now - 180_000 }, now), false);
+  assert.equal(threadLooksLive({ open: false }, { mtimeMs: now - 1_000 }, now), false);
 });
 
 const failed = results.filter((row) => !row.ok);

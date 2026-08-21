@@ -6,6 +6,8 @@ export type Thread = {
   projectName?: string;
   cwd?: string;
   isActive?: boolean;
+  working?: boolean;
+  status?: 'working' | 'waiting_approval' | 'just_finished' | 'idle' | string;
   needsApproval?: boolean;
   isPinned?: boolean;
   updatedAt?: string;
@@ -113,6 +115,26 @@ export type HubConfig = {
   effort?: string;
   accessMode?: string;
 };
+
+export const ACCESS_MODES = {
+  ask: { label: '请求批准', icon: '✋' },
+  auto: { label: '帮我批准', icon: '🛡️' },
+  full: { label: '完全访问', icon: '⚡' },
+} as const;
+
+export type AccessModeId = keyof typeof ACCESS_MODES;
+
+export function accessMeta(mode?: string) {
+  if (mode === 'ask' || mode === 'auto' || mode === 'full') return ACCESS_MODES[mode];
+  return ACCESS_MODES.full;
+}
+
+export function applyConfigPatch(prev: HubConfig, key: string, value: string): HubConfig {
+  if (key === 'model') return { ...prev, model: value, rawModel: value };
+  if (key === 'effort') return { ...prev, effort: value };
+  if (key === 'permission') return { ...prev, accessMode: value };
+  return prev;
+}
 
 export type Route =
   | { name: 'boot' }

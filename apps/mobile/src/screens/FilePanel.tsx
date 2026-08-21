@@ -120,6 +120,98 @@ export function FilePanel({
   );
 }
 
+export type FileIconInfo = {
+  text: string;
+  color?: string;
+  isBadge?: boolean;
+};
+
+export function getFileIconInfo(filename: string): FileIconInfo {
+  const lower = filename.toLowerCase();
+
+  // 1. Exact / Special Filenames
+  if (lower === '.gitignore' || lower === '.gitmodules' || lower === '.gitattributes') {
+    return { text: '◆', color: '#f05032' };
+  }
+  if (lower.startsWith('readme') || lower.endsWith('.md') || lower.endsWith('.markdown') || lower.endsWith('.mdx')) {
+    return { text: 'ℹ', color: '#38bdf8' };
+  }
+  if (lower === 'package.json' || lower === 'package-lock.json' || lower === 'pnpm-lock.yaml' || lower === 'yarn.lock' || lower === 'bun.lockb') {
+    return { text: '⬢', color: '#ef4444' };
+  }
+  if (lower.startsWith('license') || lower.startsWith('licence')) {
+    return { text: '⚖', color: '#eab308' };
+  }
+  if (lower === 'dockerfile' || lower.startsWith('docker-compose')) {
+    return { text: '🐳', color: '#38bdf8' };
+  }
+
+  // 2. Extensions
+  if (/\.(png|jpg|jpeg|gif|webp|svg|ico|bmp|avif)$/i.test(lower)) {
+    return { text: '🖼', color: '#c084fc' };
+  }
+  if (/\.(html|htm)$/i.test(lower)) {
+    return { text: '🌐', color: '#f97316' };
+  }
+  if (/\.(css|scss|sass|less)$/i.test(lower)) {
+    return { text: '🎨', color: '#38bdf8' };
+  }
+  if (/\.(tsx|ts)$/i.test(lower)) {
+    return { text: 'TS', color: '#3b82f6', isBadge: true };
+  }
+  if (/\.(jsx|js|mjs|cjs)$/i.test(lower)) {
+    return { text: 'JS', color: '#eab308', isBadge: true };
+  }
+  if (/\.(json|json5|jsonc)$/i.test(lower)) {
+    return { text: '{}', color: '#f59e0b', isBadge: true };
+  }
+  if (/\.(yaml|yml|toml|ini|cfg|conf|config|env|env\..*)$/i.test(lower)) {
+    return { text: '⚙', color: '#94a3b8' };
+  }
+  if (/\.(py|pyw|ipynb)$/i.test(lower)) {
+    return { text: '🐍', color: '#3b82f6' };
+  }
+  if (/\.(rs)$/i.test(lower)) {
+    return { text: '🦀', color: '#f97316' };
+  }
+  if (/\.(go)$/i.test(lower)) {
+    return { text: '🐹', color: '#06b6d4' };
+  }
+  if (/\.(sh|bash|zsh|ps1|bat|cmd)$/i.test(lower)) {
+    return { text: '⚡', color: '#22c55e' };
+  }
+  if (/\.(log|txt|out)$/i.test(lower)) {
+    return { text: '📄', color: '#94a3b8' };
+  }
+  if (/\.(sqlite|db|sql)$/i.test(lower)) {
+    return { text: '🗄', color: '#0ea5e9' };
+  }
+  if (/\.(zip|tar|gz|7z|rar)$/i.test(lower)) {
+    return { text: '📦', color: '#ea580c' };
+  }
+  if (/\.(pdf|doc|docx|xls|xlsx|ppt|pptx)$/i.test(lower)) {
+    return { text: '📑', color: '#ef4444' };
+  }
+
+  return { text: '📄', color: '#94a3b8' };
+}
+
+function FileIconView({ name }: { name: string }) {
+  const icon = getFileIconInfo(name);
+  if (icon.isBadge) {
+    return (
+      <View style={[styles.miniBadge, { borderColor: icon.color }]}>
+        <Text style={[styles.miniBadgeText, { color: icon.color }]}>{icon.text}</Text>
+      </View>
+    );
+  }
+  return (
+    <Text style={[styles.fileIconChar, { color: icon.color || '#94a3b8' }]}>
+      {icon.text}
+    </Text>
+  );
+}
+
 function TreeRow({
   node,
   depth,
@@ -140,10 +232,17 @@ function TreeRow({
       <View>
         <Pressable
           onPress={() => onToggle(node.path)}
-          style={[styles.folder, { backgroundColor: colors.shell, marginLeft: 10 + depth * 12 }]}
+          style={({ pressed }) => [
+            styles.treeDirRow,
+            { paddingLeft: 10 + depth * 14 },
+            pressed && { backgroundColor: colors.shell },
+          ]}
         >
-          <Text style={{ color: colors.text, fontSize: 15, fontWeight: '600' }}>
-            {expanded ? '▾  文件夹' : '▸  文件夹'}  {node.name}
+          <Text style={[styles.treeChevron, { color: colors.muted }]}>
+            {expanded ? '⌄' : '›'}
+          </Text>
+          <Text style={[styles.treeDirName, { color: colors.text }]} numberOfLines={1}>
+            {node.name}
           </Text>
         </Pressable>
         {expanded
@@ -164,9 +263,16 @@ function TreeRow({
   return (
     <Pressable
       onPress={() => onOpenFile(node.path)}
-      style={{ paddingLeft: 22 + depth * 12, paddingVertical: 10, paddingRight: 12 }}
+      style={({ pressed }) => [
+        styles.treeFileRow,
+        { paddingLeft: 24 + depth * 14 },
+        pressed && { backgroundColor: colors.shell },
+      ]}
     >
-      <Text style={{ color: colors.text, fontSize: 15 }}>📄  {node.name}</Text>
+      <FileIconView name={node.name} />
+      <Text style={[styles.treeFileName, { color: colors.text }]} numberOfLines={1}>
+        {node.name}
+      </Text>
     </Pressable>
   );
 }
@@ -199,15 +305,65 @@ function UsageBar({
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
-  head: { fontSize: 18, fontWeight: '700', paddingHorizontal: space.md, paddingTop: space.md },
-  cwd: { fontSize: 12, paddingHorizontal: space.md, paddingBottom: 8 },
-  searchInput: { borderWidth: 1, borderRadius: radius.pill, paddingHorizontal: 14, paddingVertical: 8, fontSize: 14 },
-  actions: { flexDirection: 'row', gap: 8, paddingHorizontal: space.md, paddingBottom: 8 },
-  chip: { borderRadius: radius.pill, paddingHorizontal: 12, paddingVertical: 6 },
+  head: { fontSize: 17, fontWeight: '700', paddingHorizontal: space.md, paddingTop: 14 },
+  cwd: { fontSize: 12, paddingHorizontal: space.md, paddingBottom: 6 },
+  searchInput: { borderWidth: 1, borderRadius: radius.pill, paddingHorizontal: 12, paddingVertical: 6, fontSize: 13 },
+  actions: { flexDirection: 'row', gap: 6, paddingHorizontal: space.md, paddingBottom: 6 },
+  chip: { borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 4 },
   list: { paddingBottom: space.md },
-  folder: { marginRight: 10, marginBottom: 4, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 10 },
-  bars: { paddingHorizontal: space.md, paddingVertical: 10, borderTopWidth: StyleSheet.hairlineWidth, gap: 6 },
+  treeDirRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 5,
+    paddingRight: 10,
+    gap: 4,
+    borderRadius: 6,
+    marginHorizontal: 4,
+  },
+  treeChevron: {
+    fontSize: 14,
+    width: 14,
+    textAlign: 'center',
+    fontWeight: '600',
+  },
+  treeDirName: {
+    fontSize: 13.5,
+    fontWeight: '500',
+    flex: 1,
+  },
+  treeFileRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 4,
+    paddingRight: 10,
+    gap: 6,
+    borderRadius: 6,
+    marginHorizontal: 4,
+  },
+  treeFileName: {
+    fontSize: 13,
+    flex: 1,
+  },
+  miniBadge: {
+    width: 16,
+    height: 14,
+    borderWidth: 1,
+    borderRadius: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  miniBadgeText: {
+    fontSize: 8,
+    fontWeight: '800',
+    lineHeight: 10,
+  },
+  fileIconChar: {
+    fontSize: 13,
+    width: 16,
+    textAlign: 'center',
+  },
+  bars: { paddingHorizontal: space.md, paddingVertical: 8, borderTopWidth: StyleSheet.hairlineWidth, gap: 4 },
   barRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  barTrack: { flex: 1, height: 6, borderRadius: 3, overflow: 'hidden' },
-  barFill: { height: 6, borderRadius: 3 },
+  barTrack: { flex: 1, height: 5, borderRadius: 3, overflow: 'hidden' },
+  barFill: { height: 5, borderRadius: 3 },
 });

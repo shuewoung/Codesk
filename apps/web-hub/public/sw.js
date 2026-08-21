@@ -1,4 +1,4 @@
-const CACHE_NAME = 'codesk-v3.40.0';
+const CACHE_NAME = 'codesk-v3.42.0';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();

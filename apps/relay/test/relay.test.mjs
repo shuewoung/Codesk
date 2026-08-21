@@ -223,7 +223,13 @@ test('hub can only push to its own registration ids', async () => {
     v: 1,
     type: 'push_send',
     hubId: hubA.hubId,
-    payload: { title: '审批', body: '需要批准', tag: 'codex-approval-1' }
+    payload: {
+      title: '审批',
+      body: '需要批准',
+      tag: 'codex-approval-01a01ffb-f027-7f23-8187-22f9dfc5ac34',
+      url: '/#thread-01a01ffb-f027-7f23-8187-22f9dfc5ac34',
+      threadId: '01a01ffb-f027-7f23-8187-22f9dfc5ac34'
+    }
   }));
   const sent = await waitType(hubWsA, 'push_send');
   assert.equal(sent.payload.ok, true);
@@ -231,6 +237,7 @@ test('hub can only push to its own registration ids', async () => {
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].audience.registration_id, ['ridAAAA1111']);
   assert.equal(calls[0].notification.android.title, '审批');
+  assert.equal(calls[0].notification.android.extras.threadId, '01a01ffb-f027-7f23-8187-22f9dfc5ac34');
 
   const phone = await openWs(wsBase);
   phone.send(JSON.stringify({

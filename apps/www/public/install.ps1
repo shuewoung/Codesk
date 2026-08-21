@@ -8,7 +8,7 @@ $ExeName = "CodeskHub.exe"
 $Urls = @(
   "https://codesk.icu/CodeskHub-windows.zip",
   "https://github.com/shuewoung/codesk/releases/latest/download/CodeskHub-windows.zip",
-  "https://github.com/shuewoung/codesk/releases/download/v1.0.6/CodeskHub-windows.zip"
+  "https://github.com/shuewoung/codesk/releases/download/v1.0.10/CodeskHub-windows.zip"
 )
 
 function Write-Step($msg) {

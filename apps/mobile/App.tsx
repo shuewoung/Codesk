@@ -1,6 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Platform, Pressable, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Platform, Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { FilePanel } from './src/screens/FilePanel';
 import { FilePreviewScreen } from './src/screens/FilePreviewScreen';
@@ -10,6 +10,7 @@ import { SettingsScreen } from './src/screens/SettingsScreen';
 import { ThreadListScreen } from './src/screens/ThreadListScreen';
 import { ThreadScreen } from './src/screens/ThreadScreen';
 import { SessionProvider, useSession } from './src/session';
+import { subscribeJpushOpens } from './src/push';
 import { ThemeProvider, useTheme } from './src/theme-context';
 
 type Shell =
@@ -26,6 +27,9 @@ function Root() {
   const [left, setLeft] = useState(false);
   const [right, setRight] = useState(false);
 
+  const { width } = useWindowDimensions();
+  const isWide = width >= 1100;
+
   useEffect(() => {
     if (!session.hydrated) return;
     if (!session.paired) {
@@ -39,9 +43,16 @@ function Root() {
   useEffect(() => {
     if (session.lastCreatedId) {
       setThreadId(session.lastCreatedId);
-      setLeft(false);
+      if (!isWide) setLeft(false);
     }
-  }, [session.lastCreatedId]);
+  }, [session.lastCreatedId, isWide]);
+
+  useEffect(() => subscribeJpushOpens((id) => {
+    setThreadId(id);
+    setShell((prev) => (prev?.name === 'pair' || prev?.name === 'scan' ? prev : null));
+    setLeft(false);
+    setRight(false);
+  }), []);
 
   if (!session.hydrated) {
     return (
@@ -81,41 +92,77 @@ function Root() {
       />
     );
   } else {
-    body = (
-      <View style={styles.main}>
-        <ThreadScreen
-          threadId={threadId}
-          onOpenLeft={() => { setRight(false); setLeft(true); }}
-          onOpenRight={() => { setLeft(false); setRight(true); }}
-          onOpenFile={(path) => { setRight(false); setShell({ name: 'file', path }); }}
-          onScan={() => setShell({ name: 'scan' })}
-        />
-        {left ? (
-          <View style={styles.overlay}>
-            <View style={[styles.drawerLeft, { backgroundColor: colors.bg }]}>
-              <ThreadListScreen
-                selectedId={threadId}
-                onOpenThread={(id) => { setThreadId(id); setLeft(false); }}
-                onSettings={() => { setLeft(false); setShell({ name: 'settings' }); }}
-                onScan={() => { setLeft(false); setShell({ name: 'scan' }); }}
-              />
-            </View>
-            <Pressable style={styles.dim} onPress={() => setLeft(false)} />
+    const narrowLeft = left && !isWide;
+    const narrowRight = right && !isWide;
+
+    if (isWide) {
+      body = (
+        <View style={styles.desktopRow}>
+          <View style={[styles.desktopLeft, { backgroundColor: colors.bg, borderRightColor: colors.line }]}>
+            <ThreadListScreen
+              selectedId={threadId}
+              onOpenThread={setThreadId}
+              onSettings={() => setShell({ name: 'settings' })}
+              onScan={() => setShell({ name: 'scan' })}
+            />
           </View>
-        ) : null}
-        {right ? (
-          <View style={styles.overlay}>
-            <Pressable style={styles.dim} onPress={() => setRight(false)} />
-            <View style={[styles.drawerRight, { backgroundColor: colors.bg }]}>
-              <FilePanel
-                threadId={threadId}
-                onOpenFile={(path) => { setRight(false); setShell({ name: 'file', path }); }}
-              />
-            </View>
+
+          <View style={styles.desktopMain}>
+            <ThreadScreen
+              threadId={threadId}
+              onOpenLeft={() => setLeft((v) => !v)}
+              onOpenRight={() => setRight((v) => !v)}
+              onOpenFile={(path) => setShell({ name: 'file', path })}
+              onScan={() => setShell({ name: 'scan' })}
+              hideSideButtons
+            />
           </View>
-        ) : null}
-      </View>
-    );
+
+          <View style={[styles.desktopRight, { backgroundColor: colors.bg, borderLeftColor: colors.line }]}>
+            <FilePanel
+              threadId={threadId}
+              onOpenFile={(path) => setShell({ name: 'file', path })}
+            />
+          </View>
+        </View>
+      );
+    } else {
+      body = (
+        <View style={styles.main}>
+          <ThreadScreen
+            threadId={threadId}
+            onOpenLeft={() => { setRight(false); setLeft(true); }}
+            onOpenRight={() => { setLeft(false); setRight(true); }}
+            onOpenFile={(path) => { setRight(false); setShell({ name: 'file', path }); }}
+            onScan={() => setShell({ name: 'scan' })}
+          />
+          {narrowLeft ? (
+            <View style={styles.overlay}>
+              <View style={[styles.drawerLeft, { backgroundColor: colors.bg }]}>
+                <ThreadListScreen
+                  selectedId={threadId}
+                  onOpenThread={(id) => { setThreadId(id); setLeft(false); }}
+                  onSettings={() => { setLeft(false); setShell({ name: 'settings' }); }}
+                  onScan={() => { setLeft(false); setShell({ name: 'scan' }); }}
+                />
+              </View>
+              <Pressable style={styles.dim} onPress={() => setLeft(false)} />
+            </View>
+          ) : null}
+          {narrowRight ? (
+            <View style={styles.overlay}>
+              <Pressable style={styles.dim} onPress={() => setRight(false)} />
+              <View style={[styles.drawerRight, { backgroundColor: colors.bg }]}>
+                <FilePanel
+                  threadId={threadId}
+                  onOpenFile={(path) => { setRight(false); setShell({ name: 'file', path }); }}
+                />
+              </View>
+            </View>
+          ) : null}
+        </View>
+      );
+    }
   }
 
   return (
@@ -147,4 +194,10 @@ const styles = StyleSheet.create({
   dim: { flex: 1, backgroundColor: 'rgba(0,0,0,0.28)' },
   drawerLeft: { width: '82%', maxWidth: 360 },
   drawerRight: { width: '82%', maxWidth: 360 },
+
+  // Wide screen desktop layout (two sidebars always visible)
+  desktopRow: { flex: 1, flexDirection: 'row' },
+  desktopLeft: { width: 280, borderRightWidth: 1, overflow: 'hidden' },
+  desktopMain: { flex: 1, minWidth: 0 },
+  desktopRight: { width: 320, borderLeftWidth: 1, overflow: 'hidden' },
 });

@@ -250,16 +250,11 @@ export function createRelayClient({
       return httpUrl || null;
     },
     requestPairCode(timeoutMs = 8000) {
-      if (!wsUrl) return Promise.resolve({ code: null, expiresAtMs: null, relayOnline: false });
-      if (!online) return Promise.resolve({ code: pairCode?.code || null, expiresAtMs: pairCode?.expiresAtMs || null, relayOnline: false });
+      if (!wsUrl || !online) return Promise.resolve({ code: null, expiresAtMs: null, relayOnline: false });
       return new Promise((resolve) => {
         const timer = setTimeout(() => {
           if (pairWaiter) pairWaiter = null;
-          resolve({
-            code: pairCode?.code || null,
-            expiresAtMs: pairCode?.expiresAtMs || null,
-            relayOnline: online,
-          });
+          resolve({ code: null, expiresAtMs: null, relayOnline: online });
         }, timeoutMs);
         pairWaiter = {
           resolve: (value) => {
@@ -267,7 +262,11 @@ export function createRelayClient({
             resolve({ ...value, relayOnline: online });
           },
         };
-        sendRaw(pack('request_pair_code', { hubE2ePub: identity.e2ePub || '' }));
+        if (!sendRaw(pack('request_pair_code', { hubE2ePub: identity.e2ePub || '' }))) {
+          clearTimeout(timer);
+          pairWaiter = null;
+          resolve({ code: null, expiresAtMs: null, relayOnline: false });
+        }
       });
     },
     forwardApp(appMsg, { deviceId = null } = {}) {
@@ -298,6 +297,8 @@ export function createRelayClient({
         title: payload.title || 'Codesk',
         body: payload.body || '',
         tag: payload.tag || payload.url || '',
+        url: payload.url || '',
+        threadId: payload.threadId || '',
       }));
     },
   };

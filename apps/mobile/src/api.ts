@@ -9,6 +9,8 @@ async function readJson(res: Response): Promise<Record<string, unknown> | null> 
   }
 }
 
+const pairInflight = new Map<string, Promise<{ deviceToken: string; hubId: string; hubE2ePub: string }>>();
+
 export async function pairWithCode(
   relayUrl: string,
   code: string,
@@ -17,31 +19,42 @@ export async function pairWithCode(
   const trimmed = String(code || '').trim();
   if (!base) throw new Error('请先填写中继地址');
   if (!trimmed) throw new Error('缺少配对码');
-  let res: Response;
-  try {
-    res = await fetch(`${base}/api/relay/pair`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: trimmed }),
-    });
-  } catch {
-    throw new Error('网络不通：连不上中继。出门请填 https://hub.codesk.icu:8787');
-  }
-  const json = await readJson(res);
-  const token = typeof json?.deviceToken === 'string' ? json.deviceToken : '';
-  if (!res.ok || !token) {
-    const codeName = typeof json?.code === 'string' ? json.code : '';
-    const msg = (typeof json?.message === 'string' && json.message) || (typeof json?.error === 'string' && json.error) || '';
-    if (/invalid_code|pair_invalid|expired/i.test(`${codeName} ${msg}`)) {
-      throw new Error('配对码不对或已过期。网络是通的，请到电脑主机台刷新码再试。');
+  const key = `${base}:${trimmed.toUpperCase()}`;
+  const pending = pairInflight.get(key);
+  if (pending) return pending;
+  const task = (async () => {
+    let res: Response;
+    try {
+      res = await fetch(`${base}/api/relay/pair`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: trimmed }),
+      });
+    } catch {
+      throw new Error('网络不通：连不上中继。出门请填 https://hub.codesk.icu:8787');
     }
-    throw new Error(msg || '配对失败');
+    const json = await readJson(res);
+    const token = typeof json?.deviceToken === 'string' ? json.deviceToken : '';
+    if (!res.ok || !token) {
+      const codeName = typeof json?.code === 'string' ? json.code : '';
+      const msg = (typeof json?.message === 'string' && json.message) || (typeof json?.error === 'string' && json.error) || '';
+      if (/invalid_code|pair_invalid|expired/i.test(`${codeName} ${msg}`)) {
+        throw new Error('配对码不对或已过期。网络是通的，请到电脑主机台刷新码再试。');
+      }
+      throw new Error(msg || '配对失败');
+    }
+    return {
+      deviceToken: token,
+      hubId: typeof json?.hubId === 'string' ? json.hubId : '',
+      hubE2ePub: typeof json?.hubE2ePub === 'string' ? json.hubE2ePub : '',
+    };
+  })();
+  pairInflight.set(key, task);
+  try {
+    return await task;
+  } finally {
+    pairInflight.delete(key);
   }
-  return {
-    deviceToken: token,
-    hubId: typeof json?.hubId === 'string' ? json.hubId : '',
-    hubE2ePub: typeof json?.hubE2ePub === 'string' ? json.hubE2ePub : '',
-  };
 }
 
 export async function loginLan(hubUrl: string, password: string): Promise<{ token: string; hubId: string }> {

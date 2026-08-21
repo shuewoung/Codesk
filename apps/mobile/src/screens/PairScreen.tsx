@@ -74,14 +74,15 @@ export function PairScreen({ onScan }: { onScan: () => void }) {
 
         <View style={[styles.card, card]}>
           <Text style={[styles.cardTitle, { color: colors.text }]}>家里 WiFi</Text>
-          <Text style={[styles.cardHint, { color: colors.muted }]}>用主机台左边的常驻家里码。同一局域网，不经中继。</Text>
+          <Text style={[styles.cardHint, { color: colors.muted }]}>用主机台左边的 4 位家里码。同一局域网，不经中继。</Text>
           {discoverHint ? <Text style={[styles.cardHint, { color: colors.text }]}>{discoverHint}</Text> : null}
           <TextInput
             value={homeCode}
             onChangeText={(v) => setHomeCode(v.toUpperCase())}
             autoCapitalize="characters"
             autoCorrect={false}
-            placeholder="家里码"
+            placeholder="4 位家里码"
+            maxLength={4}
             placeholderTextColor={colors.muted}
             style={[styles.input, { backgroundColor: colors.shell, color: colors.text, borderColor: colors.line }]}
             returnKeyType="next"

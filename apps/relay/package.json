@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node src/index.js",
     "invite": "node bin/invite.mjs",
-    "test": "node --test test/relay.test.mjs"
+    "test": "node --test test/relay.test.mjs test/push.test.mjs"
   },
   "engines": {
     "node": ">=18"

@@ -1,0 +1,941 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codesk — 进了 ICU，还要遥控 Codex</title>
+  <meta name="description" content="电脑上的 Codex，手机上接着干。同一份 session，和桌面一模一样，不另起炉灶。比官方 Remote 更快更稳。">
+  <meta name="theme-color" content="#F7F8FC">
+  <link rel="icon" type="image/png" href="codesk-app.png">
+  <link rel="apple-touch-icon" href="codesk-app.png">
+  <link rel="manifest" href="manifest.json">
+  <link rel="canonical" href="https://codesk.icu/">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://codesk.icu/">
+  <meta property="og:title" content="Codesk — 进了 ICU，还要遥控 Codex">
+  <meta property="og:description" content="同一份 session，桌面和手机来回切。无缝流转，不另开云。">
+  <meta property="og:image" content="https://codesk.icu/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f7f8fc;
+      --ink: #12141a;
+      --muted: #5c6370;
+      --line: #e6e8ee;
+      --accent: #4f6bff;
+      --accent-hover: #3b5bff;
+      --accent-soft: #f0f3ff;
+      --petal-a: #d7c6ff;
+      --petal-b: #7b8cff;
+      --petal-c: #3b5bff;
+      --dark: #141416;
+      --dark-2: #1b1d22;
+      --dark-muted: #8b909a;
+      --white: #fff;
+      --ok: #22c55e;
+      --shadow-sm: 0 2px 8px rgba(18, 20, 26, 0.04);
+      --shadow-md: 0 12px 32px rgba(18, 20, 26, 0.06);
+      --shadow-lg: 0 20px 48px rgba(18, 20, 26, 0.10);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+      overflow-x: hidden;
+    }
+    a { color: inherit; }
+    img { max-width: 100%; }
+    .wrap {
+      width: min(1140px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      backdrop-filter: blur(16px);
+      background: color-mix(in srgb, var(--bg) 86%, transparent);
+      border-bottom: 1px solid rgba(230, 232, 238, 0.8);
+      transition: all 0.2s ease;
+    }
+    nav .bar {
+      height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      font-size: 19px;
+    }
+    .brand img {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      box-shadow: 0 4px 12px rgba(79, 107, 255, 0.2);
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .nav-links a:not(.btn) {
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--muted);
+      padding: 8px 12px;
+      border-radius: 8px;
+      transition: color 0.15s, background 0.15s;
+    }
+    .nav-links a:not(.btn):hover {
+      color: var(--ink);
+      background: rgba(0, 0, 0, 0.04);
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 42px;
+      padding: 0 18px;
+      border-radius: 999px;
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 600;
+      border: 1px solid transparent;
+      transition: all 0.15s ease;
+      cursor: pointer;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+      box-shadow: 0 4px 16px rgba(79, 107, 255, 0.28);
+    }
+    .btn-primary:hover {
+      background: var(--accent-hover);
+      box-shadow: 0 6px 20px rgba(79, 107, 255, 0.38);
+    }
+    .btn-ghost {
+      background: #fff;
+      color: var(--ink);
+      border-color: var(--line);
+      box-shadow: var(--shadow-sm);
+    }
+    .btn-ghost:hover {
+      background: #fafbfc;
+      border-color: #d8dbe2;
+    }
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 44px 0 36px;
+    }
+    .orb {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(50px);
+      pointer-events: none;
+    }
+    .orb-a { width: 320px; height: 320px; background: var(--petal-a); top: -80px; left: -60px; opacity: .55; }
+    .orb-b { width: 260px; height: 260px; background: var(--petal-b); top: 40px; right: 10%; opacity: .28; }
+    .orb-c { width: 220px; height: 220px; background: var(--petal-c); bottom: -40px; left: 38%; opacity: .16; }
+    .hero-grid {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(320px, 480px) 1fr;
+      gap: 48px;
+      align-items: center;
+    }
+    .copy { display: grid; gap: 16px; }
+    .mark {
+      width: 68px;
+      height: 68px;
+      border-radius: 22px;
+      box-shadow: 0 10px 24px rgba(79, 107, 255, 0.25);
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(40px, 5.5vw, 56px);
+      letter-spacing: -0.05em;
+      font-weight: 800;
+      line-height: 1.05;
+    }
+    .slogan {
+      margin: 0;
+      font-size: 22px;
+      letter-spacing: -0.03em;
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .lead {
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.7;
+    }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chips span {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 999px;
+      padding: 5px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      box-shadow: var(--shadow-sm);
+    }
+
+    /* Hero Quickstart Terminal Box */
+    .cmd-box {
+      background: #1e2029;
+      border: 1px solid #2d313e;
+      border-radius: 14px;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+      margin-top: 4px;
+    }
+    .cmd-text {
+      font-family: "JetBrains Mono", Cascadia Code, Consolas, monospace;
+      font-size: 13px;
+      color: #e6e8ee;
+      overflow-x: auto;
+      white-space: nowrap;
+      scrollbar-width: none;
+    }
+    .cmd-text::-webkit-scrollbar { display: none; }
+    .cmd-copy-btn {
+      background: rgba(255, 255, 255, 0.12);
+      border: 0;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: all 0.15s ease;
+      font-family: inherit;
+    }
+    .cmd-copy-btn:hover {
+      background: var(--accent);
+    }
+
+    .cta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
+    .stage {
+      display: grid;
+      grid-template-columns: 1fr 180px;
+      gap: 14px;
+      height: min(64dvh, 540px);
+    }
+    .frame {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      overflow: hidden;
+      min-width: 0;
+      box-shadow: var(--shadow-lg);
+      position: relative;
+    }
+    .frame img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      object-position: top left;
+    }
+    .phone img { object-position: top center; }
+    
+    section { padding: 76px 0; }
+    .kicker {
+      margin: 0 0 10px;
+      font-size: 12px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: var(--accent);
+      font-weight: 700;
+    }
+    h2 {
+      margin: 0 0 12px;
+      font-size: clamp(28px, 4vw, 40px);
+      letter-spacing: -0.045em;
+      line-height: 1.18;
+      font-weight: 800;
+    }
+    .sub {
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.7;
+      max-width: 58ch;
+    }
+    
+    /* Client Matrix */
+    .client-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-top: 36px;
+    }
+    .client-card {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      box-shadow: var(--shadow-md);
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .client-card:hover {
+      transform: translateY(-3px);
+      box-shadow: var(--shadow-lg);
+    }
+    .client-icon {
+      font-size: 28px;
+      margin-bottom: 4px;
+    }
+    .client-card h3 {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .client-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+      flex-grow: 1;
+    }
+    .client-action {
+      margin-top: 8px;
+    }
+    .client-action .btn {
+      width: 100%;
+      min-height: 38px;
+      font-size: 13px;
+    }
+    .apk-qr-box {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      padding: 10px;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      margin: 4px 0 8px;
+    }
+    .apk-qr-img {
+      width: 136px;
+      height: 136px;
+      display: block;
+      border-radius: 8px;
+    }
+    .apk-qr-tip {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .pillars {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-top: 36px;
+    }
+    .card {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      padding: 26px 22px;
+      display: grid;
+      gap: 10px;
+      box-shadow: var(--shadow-sm);
+    }
+    .card h3 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+    }
+    .card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.65;
+    }
+    .steps {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 36px;
+      align-items: center;
+      margin-top: 36px;
+    }
+    ol.flow {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 18px;
+    }
+    ol.flow li {
+      display: grid;
+      grid-template-columns: 40px 1fr;
+      gap: 14px;
+      align-items: start;
+    }
+    .n {
+      width: 40px;
+      height: 40px;
+      border-radius: 14px;
+      background: var(--accent-soft);
+      border: 1px solid rgba(79, 107, 255, 0.2);
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      color: var(--accent);
+      font-size: 16px;
+    }
+    ol.flow h3 { margin: 0 0 4px; font-size: 17px; font-weight: 700; }
+    ol.flow p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
+    .pair {
+      display: grid;
+      grid-template-columns: 1fr 150px;
+      gap: 12px;
+      height: 380px;
+    }
+
+    /* Comparison Dark Section */
+    .compare {
+      background: var(--dark);
+      color: #f7f8fc;
+      padding: 88px 0;
+    }
+    .compare .kicker { color: var(--petal-a); }
+    .compare .sub { color: #c5c8d0; }
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 14px;
+      margin: 36px 0 32px;
+    }
+    .vs {
+      background: var(--dark-2);
+      border: 1px solid #2a2d34;
+      border-radius: 22px;
+      padding: 24px;
+      display: grid;
+      gap: 10px;
+    }
+    .vs h3 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.03em; }
+    .vs p { margin: 0; color: #c5c8d0; font-size: 14px; line-height: 1.65; }
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid #2a2d34;
+      border-radius: 22px;
+      background: var(--dark-2);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 760px;
+      font-size: 13px;
+    }
+    th, td {
+      text-align: left;
+      padding: 15px 18px;
+      border-bottom: 1px solid #2a2d34;
+      vertical-align: top;
+      line-height: 1.5;
+    }
+    th {
+      font-size: 12px;
+      color: var(--dark-muted);
+      font-weight: 700;
+    }
+    tr:last-child td { border-bottom: 0; }
+    td.yes { color: #d7c6ff; font-weight: 600; }
+    td.no { color: #8b909a; }
+    th.hl, td.hl {
+      background: rgba(79, 107, 255, .16);
+      color: #fff;
+    }
+    .note {
+      margin: 14px 0 0;
+      color: var(--dark-muted);
+      font-size: 12px;
+    }
+
+    /* FAQ Section */
+    .faq-list {
+      display: grid;
+      gap: 12px;
+      margin-top: 36px;
+    }
+    .faq-item {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 20px 24px;
+      box-shadow: var(--shadow-sm);
+    }
+    .faq-item h3 {
+      margin: 0 0 8px;
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--ink);
+    }
+    .faq-item p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.68;
+    }
+
+    .limits .card p { max-width: none; }
+    footer {
+      border-top: 1px solid var(--line);
+      padding: 32px 0 44px;
+      color: var(--muted);
+      font-size: 13px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    footer a { color: var(--muted); text-decoration: none; font-weight: 500; }
+    footer a:hover { color: var(--accent); }
+
+    /* Toast Notification */
+    .site-toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: #111827;
+      color: #fff;
+      padding: 10px 20px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 600;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
+      opacity: 0;
+      pointer-events: none;
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      z-index: 100;
+    }
+    .site-toast.show {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d0f15;
+        --ink: #f0f2f8;
+        --muted: #8b92a4;
+        --line: #222634;
+        --accent: #5b75ff;
+        --accent-hover: #7087ff;
+        --accent-soft: #191f38;
+        --white: #151822;
+        --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
+        --shadow-md: 0 12px 32px rgba(0, 0, 0, 0.4);
+        --shadow-lg: 0 20px 48px rgba(0, 0, 0, 0.55);
+      }
+      nav {
+        background: rgba(13, 15, 21, 0.85);
+        border-bottom-color: #222634;
+      }
+      .card, .client-card, .faq-item, .frame {
+        background: #151822;
+        border-color: #222634;
+      }
+      .btn-ghost {
+        background: #1c202c;
+        color: #f0f2f8;
+        border-color: #2d3345;
+      }
+      .btn-ghost:hover {
+        background: #232938;
+      }
+      .chips span {
+        background: #171b26;
+        border-color: #262c3d;
+        color: #9ba3b8;
+      }
+      .n {
+        background: #191f38;
+        border-color: rgba(91, 117, 255, 0.3);
+      }
+      .nav-links a:not(.btn):hover {
+        background: rgba(255, 255, 255, 0.08);
+      }
+    }
+
+    @media (max-width: 960px) {
+      .client-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 860px) {
+      .hero-grid, .pillars, .steps, .compare-grid, .pair { grid-template-columns: 1fr; }
+      .stage { height: 42dvh; grid-template-columns: 1fr 120px; }
+      .pair { height: 280px; }
+      .lead { max-width: none; }
+      .nav-links a:not(.btn) { display: none; }
+      section { padding: 56px 0; }
+      .client-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="wrap bar">
+      <a class="brand" href="/">
+        <img src="codesk-app.png" alt="Codesk">
+        Codesk
+      </a>
+      <div class="nav-links">
+        <a href="#intro">产品介绍</a>
+        <a href="#clients">多端下载</a>
+        <a href="#compare">方案对比</a>
+        <a href="#faq">常见问题</a>
+        <a class="btn btn-primary" href="https://github.com/shuewoung/codesk" target="_blank" rel="noreferrer">GitHub 源码</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="orb orb-a"></div>
+    <div class="orb orb-b"></div>
+    <div class="orb orb-c"></div>
+    <div class="wrap hero-grid">
+      <section class="copy">
+        <img class="mark" src="codesk-app.png" alt="Codesk">
+        <h1>Codesk</h1>
+        <p class="slogan">进了 ICU，还要遥控 Codex</p>
+        <p class="lead">电脑上的 Codex，手机上接着干。同一份 session，和桌面一模一样：发、停、审批，无缝流转。不是另开云，不是新开会话。</p>
+        <div class="chips">
+          <span>⚡ 无缝流转</span>
+          <span>📁 同一份 session</span>
+          <span>🛡️ 凭据不离本机</span>
+        </div>
+
+        <!-- Quickstart Code Box -->
+        <div class="cmd-box">
+          <span class="cmd-text" id="install-cmd">irm https://codesk.icu/install.ps1 | iex</span>
+          <button type="button" class="cmd-copy-btn" id="btn-copy-cmd">复制命令</button>
+        </div>
+
+        <div class="cta">
+          <a class="btn btn-primary" href="#clients">⬇️ 获取客户端 / 安装包</a>
+          <a class="btn btn-ghost" href="#compare">对比官方与其他方案</a>
+        </div>
+      </section>
+      <section class="stage">
+        <figure class="frame">
+          <img src="shot-desktop.png" alt="Codesk 桌面，会话列表与桌面 Codex 同源">
+        </figure>
+        <figure class="frame phone">
+          <img src="shot-phone.png" alt="Codesk 手机，接着同一份对话">
+        </figure>
+      </section>
+    </div>
+  </header>
+
+  <!-- Download & Client Matrix -->
+  <section id="clients">
+    <div class="wrap">
+      <p class="kicker">Download &amp; Platform</p>
+      <h2>多端矩阵：随时随地接管你的工位</h2>
+      <p class="sub">无论是 Android 独立原生应用、iOS 沉浸式 PWA，还是桌面托盘守护，Codesk 均提供原汁原味的无缝体验。</p>
+
+      <div class="client-grid">
+        <div class="client-card">
+          <div class="client-icon">🤖</div>
+          <h3>Android 原生 App</h3>
+          <p>支持极光后台离线推送、摄像头扫码配对与相册附件直传，离开工位也能收到审批通知。</p>
+          <div class="apk-qr-box">
+            <img src="apk-qr.svg" alt="手机扫码下载 APK" class="apk-qr-img">
+            <span class="apk-qr-tip">📱 手机扫码直达下载</span>
+          </div>
+          <div class="client-action">
+            <a class="btn btn-primary" href="/codesk-latest.apk" download="codesk-latest.apk">直接下载 APK (v1.0.10)</a>
+          </div>
+        </div>
+
+        <div class="client-card">
+          <div class="client-icon">🍎</div>
+          <h3>iOS / iPadOS (PWA)</h3>
+          <p>在 Safari 中打开并选择「添加到主屏幕」，即刻消除浏览器地址栏，享受真原生沉浸全屏。</p>
+          <div class="client-action">
+            <a class="btn btn-ghost" href="#faq-ios">查看 PWA 安装指南</a>
+          </div>
+        </div>
+
+        <div class="client-card">
+          <div class="client-icon">🪟</div>
+          <h3>Windows 主机台</h3>
+          <p>PowerShell 一行安装，常驻系统托盘。双击图标打开主机台。</p>
+          <div class="client-action">
+            <a class="btn btn-primary" href="#install-cmd">一行安装</a>
+            <a class="btn btn-ghost" href="/CodeskHub-windows.zip">下载安装包</a>
+          </div>
+        </div>
+
+        <div class="client-card">
+          <div class="client-icon">🌐</div>
+          <h3>网页直接访问</h3>
+          <p>同一局域网 WiFi 下，手机或平板浏览器直接输入 <code>http://&lt;电脑IP&gt;:18990</code> 即可秒开操作。</p>
+          <div class="client-action">
+            <a class="btn btn-ghost" href="#how">了解配对流程</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="intro">
+    <div class="wrap">
+      <p class="kicker">Product</p>
+      <h2>不是另开一份 Codex。<br>是你电脑上那一份。</h2>
+      <p class="sub">Codesk 是本机已登录 Codex 的遥控器。桌面、VS Code、手机看同一份对话、同一个 thread、同一套上下文。电脑还在跑，人已经走开——审批弹出来，补一句、点允许、或者停掉。接着刚才那条。</p>
+      <div class="pillars">
+        <article class="card">
+          <h3>无缝流转</h3>
+          <p>和 Desktop / VS Code 同源。列表一样，thread 还是那个 thread。出门接着干，不丢上下文。</p>
+        </article>
+        <article class="card">
+          <h3>一人一机</h3>
+          <p>遥控的是你自己那台电脑。凭据留在本机，不把账号搬到云上，也不多人共用。</p>
+        </article>
+        <article class="card">
+          <h3>发 · 停 · 审批</h3>
+          <p>人离开工位，对话不能断。该批准就批准，该停就停，该补一句就补一句。</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <p class="kicker">How</p>
+      <h2>扫一下，手机里出现同一份对话。</h2>
+      <p class="sub">不换命令，不换会话，不把活搬到云上。电脑醒着、Hub 开着，就能接着干。</p>
+      <div class="steps">
+        <ol class="flow">
+          <li>
+            <span class="n">1</span>
+            <div>
+              <h3>电脑已登录 Codex</h3>
+              <p>Desktop 或 VS Code 都行。Hub 读的是本机同一份会话，不是再开一条线。</p>
+            </div>
+          </li>
+          <li>
+            <span class="n">2</span>
+            <div>
+              <h3>扫码连回自己的机器</h3>
+              <p>同一 WiFi 用家里码，出门用出门码。配对一次，手机就是遥控器。</p>
+            </div>
+          </li>
+          <li>
+            <span class="n">3</span>
+            <div>
+              <h3>接着刚才那条</h3>
+              <p>发、停、审批，和桌面来回切。电脑休眠或 Hub 没开，就停工。不装在线。</p>
+            </div>
+          </li>
+        </ol>
+        <div class="pair">
+          <figure class="frame">
+            <img src="shot-login.png" alt="主机台：家里码和出门码分开">
+          </figure>
+          <figure class="frame phone">
+            <img src="shot-phone-login.png" alt="手机配对页">
+          </figure>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="compare" id="compare">
+    <div class="wrap">
+      <p class="kicker">Compare</p>
+      <h2>为什么不用官方，<br>也不用 Happy / Paseo / MindFS</h2>
+      <p class="sub">官方 Remote 能控电脑，但连接慢、不稳定。其余大多另起炉灶：新开会话，接不上你桌面上正在跑的那一份。Codesk 只做一件事——同一份 session，丝滑流转。</p>
+
+      <div class="compare-grid">
+        <article class="vs">
+          <h3>对比官方 ChatGPT Remote</h3>
+          <p>官方能控电脑，但通道绕、连得慢、还容易断。Codesk 连回你自己那台机器，更快，更稳。同样是遥控本机，不必走官方慢通道。</p>
+        </article>
+        <article class="vs">
+          <h3>对比 Happy Coder</h3>
+          <p>Happy 要用包装命令代替原生 Codex，切到手机时会重启会话。桌面 Codex / VS Code 里那一份，并不是同一条。Codesk 不换壳、不另开。</p>
+        </article>
+        <article class="vs">
+          <h3>对比 Paseo</h3>
+          <p>Paseo 是远程新开会话。电脑上正在跑的 Codex，它接不上。Codesk 的列表、thread、上下文，都和桌面一模一样。</p>
+        </article>
+        <article class="vs">
+          <h3>对比 MindFS</h3>
+          <p>MindFS 同样另起炉灶。电脑聊到一半，手机看不到那条线。Codesk 把桌面上的那条线接到手机上，接着干。</p>
+        </article>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th class="hl">Codesk</th>
+              <th>官方 Remote</th>
+              <th>Happy Coder</th>
+              <th>Paseo</th>
+              <th>MindFS</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th>同一份桌面 session</th>
+              <td class="hl yes">是。和 Desktop / VS Code 同源</td>
+              <td>走官方通道控电脑</td>
+              <td class="no">否。远程会重启会话</td>
+              <td class="no">否。只能新开</td>
+              <td class="no">否。只能新开</td>
+            </tr>
+            <tr>
+              <th>接着刚才那条</th>
+              <td class="hl yes">丝滑流转，不另起炉灶</td>
+              <td>能控，但连接慢、易断</td>
+              <td class="no">接不上桌面那一份</td>
+              <td class="no">同步不了电脑会话</td>
+              <td class="no">同步不了电脑会话</td>
+            </tr>
+            <tr>
+              <th>连接性能</th>
+              <td class="hl yes">更快、更稳（微秒级本地读）</td>
+              <td class="no">慢，不稳定</td>
+              <td>自有包装通道</td>
+              <td>独立远程会话</td>
+              <td>独立远程会话</td>
+            </tr>
+            <tr>
+              <th>是不是另开云</th>
+              <td class="hl yes">不是。是你自己的电脑</td>
+              <td>官方远程</td>
+              <td class="no">包装 CLI，另起炉灶</td>
+              <td class="no">另起炉灶</td>
+              <td class="no">另起炉灶</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">对比针对「能不能接着电脑上那一份 Codex 干」。官方 Remote 的问题是通道；其余是会话不是同一份。</p>
+    </div>
+  </section>
+
+  <!-- FAQ Section -->
+  <section id="faq">
+    <div class="wrap">
+      <p class="kicker">FAQ</p>
+      <h2>常见问题与核心解答</h2>
+      <p class="sub">了解关于连接、权限、安全以及多端协同的一切疑问。</p>
+
+      <div class="faq-list">
+        <div class="faq-item">
+          <h3>Q1. “家里码”与“出门码”有什么区别？</h3>
+          <p>“家里码”是常驻安全码，在同一 WiFi 局域网下直连电脑，完全不经过外部中继服务器，响应速度极快；“出门码”是一次性动态配对码，人在外面时通过端到端加密中继通道连回电脑主机。</p>
+        </div>
+
+        <div class="faq-item" id="faq-ios">
+          <h3>Q2. iOS 设备如何获得最佳的 App 体验？</h3>
+          <p>在 iPhone / iPad 的 Safari 浏览器中打开您的 Codesk 地址，点击浏览器底部的「分享」图标，选择「添加到主屏幕」。添加到桌面后，即是一个完全消除地址栏与 Tab 栏的独立全屏原生 App。</p>
+        </div>
+
+        <div class="faq-item">
+          <h3>Q3. 为什么电脑休眠后手机不能干活？</h3>
+          <p>Codesk 恪守“一人一机，凭据留在本机”的极客安全原则，不设云端代跑队列，也不存储您的账号 Token。电脑是真正的执行引擎，电脑工作、手机遥控；电脑休眠即停工，绝不泄漏数据。</p>
+        </div>
+
+        <div class="faq-item">
+          <h3>Q4. 会不会抢占桌面或 VS Code 正在运行的会话？</h3>
+          <p>不会。Codesk 内部与桌面共享同一把文件与会话锁。桌面开着时写入不抢会话，手机端实时呈现流式输出；桌面空闲时 Hub 接替推进，双端无缝同步。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="limits">
+    <div class="wrap">
+      <p class="kicker">Honest</p>
+      <h2>有意做窄。</h2>
+      <div class="pillars">
+        <article class="card">
+          <h3>Hub 目前只做 Windows</h3>
+          <p>本机要已登录 Codex Desktop 或 VS Code。手机只是遥控器。</p>
+        </article>
+        <article class="card">
+          <h3>电脑休眠就停工</h3>
+          <p>Hub 没开、电脑睡着，就不能干活。没有离线队列，不装在线。</p>
+        </article>
+        <article class="card">
+          <h3>一人一机</h3>
+          <p>不共享账号，不把凭据搬出这台电脑。能打开 Hub，就等于能操作你的 Codex。</p>
+        </article>
+      </div>
+      <div class="cta" style="margin-top:28px">
+        <a class="btn btn-primary" href="https://github.com/shuewoung/codesk" target="_blank" rel="noreferrer">去 GitHub 查看源码</a>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <footer>
+      <span>Codesk · codesk.icu</span>
+      <a href="https://github.com/shuewoung/codesk" target="_blank" rel="noreferrer">GitHub 仓库</a>
+    </footer>
+  </div>
+
+  <div id="toast" class="site-toast">已复制安装命令</div>
+
+  <script>
+    const btnCopy = document.getElementById('btn-copy-cmd');
+    const toast = document.getElementById('toast');
+    if (btnCopy) {
+      btnCopy.addEventListener('click', () => {
+        const text = 'irm https://codesk.icu/install.ps1 | iex';
+        navigator.clipboard.writeText(text).then(() => {
+          btnCopy.textContent = '✓ 已复制';
+          toast.classList.add('show');
+          setTimeout(() => {
+            btnCopy.textContent = '复制命令';
+            toast.classList.remove('show');
+          }, 2000);
+        }).catch(() => {
+          btnCopy.textContent = '复制失败';
+        });
+      });
+    }
+  </script>
+</body>
+</html>

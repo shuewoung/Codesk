@@ -8,6 +8,8 @@ import {
   decodeApprovalCommand,
   emptyHistory,
   flattenItems,
+  groupCommandNodes,
+  commandGroupCounts,
   isApprovalExpired,
   mergeHistory,
   parseThreadList,
@@ -116,6 +118,29 @@ test('approval parsers require ids and keep protocol decisions untouched', () =>
   assert.equal(fromMsg?.requestId, 'req-2');
   assert.equal(fromMsg?.source, 'live');
   assert.equal(fromMsg?.at, at);
+});
+
+test('groupCommandNodes collapses consecutive terminal commands', () => {
+  const grouped = groupCommandNodes([
+    { id: 'u1', kind: 'user', text: 'go' },
+    { id: 'c1', kind: 'command', text: 'exec' },
+    { id: 'c2', kind: 'command', text: 'exec' },
+    { id: 'c3', kind: 'command', text: 'followup task' },
+    { id: 'a1', kind: 'assistant', text: 'done' },
+    { id: 'c4', kind: 'command', text: 'exec' },
+  ]);
+  assert.equal(grouped.length, 4);
+  assert.equal(grouped[0].kind, 'user');
+  assert.equal(grouped[1].kind, 'cmd-group');
+  if (grouped[1].kind === 'cmd-group') {
+    assert.equal(grouped[1].commands.length, 3);
+    assert.deepEqual(commandGroupCounts(grouped[1].commands), [
+      { label: 'exec', count: 2 },
+      { label: 'followup task', count: 1 },
+    ]);
+  }
+  assert.equal(grouped[2].kind, 'assistant');
+  assert.equal(grouped[3].kind, 'cmd-group');
 });
 
 test('collectApprovalIds and percent-encoded commands decode', () => {
