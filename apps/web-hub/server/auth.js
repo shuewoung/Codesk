@@ -16,21 +16,30 @@ export function isPublicApi(pathname, method) {
   return PUBLIC.has(`${String(method || 'GET').toUpperCase()} ${pathname}`);
 }
 
+export function isLocalNetworkHost(host) {
+  const h = String(host || '').replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1') return true;
+  if (/^10(?:\.\d{1,3}){3}$/.test(h)) return true;
+  if (/^192\.168(?:\.\d{1,3}){2}$/.test(h)) return true;
+  const m172 = h.match(/^172\.(\d{1,3})(?:\.\d{1,3}){2}$/);
+  if (m172) {
+    const n = Number(m172[1]);
+    if (n >= 16 && n <= 31) return true;
+  }
+  const m100 = h.match(/^100\.(\d{1,3})(?:\.\d{1,3}){2}$/);
+  if (m100) {
+    const n = Number(m100[1]);
+    if (n >= 64 && n <= 127) return true;
+  }
+  return false;
+}
+
 export function isAllowedCorsOrigin(origin) {
   if (!origin) return false;
   try {
     const u = new URL(origin);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-    const host = String(u.hostname || '').replace(/^\[|\]$/g, '');
-    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
-    if (/^10(?:\.\d{1,3}){3}$/.test(host)) return true;
-    if (/^192\.168(?:\.\d{1,3}){2}$/.test(host)) return true;
-    const m = host.match(/^172\.(\d{1,3})(?:\.\d{1,3}){2}$/);
-    if (m) {
-      const n = Number(m[1]);
-      return n >= 16 && n <= 31;
-    }
-    return false;
+    return isLocalNetworkHost(u.hostname);
   } catch {
     return false;
   }
@@ -109,16 +118,41 @@ export function isLoopbackAddress(addr) {
   return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }
 
+const FORWARDED_HEADER_NAMES = [
+  'cf-connecting-ip',
+  'cf-ray',
+  'cf-access-jwt-assertion',
+  'cf-access-authenticated-user-email',
+  'x-forwarded-for',
+  'x-forwarded-proto',
+  'x-real-ip',
+  'forwarded',
+  'true-client-ip',
+];
+
+export function isForwardedRequest(req) {
+  const headers = req?.headers || {};
+  for (const name of FORWARDED_HEADER_NAMES) {
+    const value = headers[name];
+    if (value != null && String(value).trim()) return true;
+  }
+  return false;
+}
+
+export const TRUSTED_LOCAL_ORIGIN_PORTS = [18990, 18991];
+
 export function isTrustedLocalReq(req, port = 18990) {
+  if (isForwardedRequest(req)) return false;
   if (!isLoopbackAddress(req?.socket?.remoteAddress)) return false;
   const origin = String(req?.headers?.origin || '').trim();
   if (!origin) return true;
   try {
     const u = new URL(origin);
     const host = String(u.hostname || '').replace(/^\[|\]$/g, '');
-    if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') return false;
+    if (!isLocalNetworkHost(host)) return false;
     const p = u.port || (u.protocol === 'https:' ? '443' : '80');
-    return String(p) === String(port);
+    if (String(p) === String(port)) return true;
+    return TRUSTED_LOCAL_ORIGIN_PORTS.includes(Number(p));
   } catch {
     return false;
   }

@@ -1310,12 +1310,15 @@ function renderThreadItem(t, projectName) {
   if (!t || !t.id) return '';
   const isWorking = Boolean(t.isActive || t.status === 'working' || t.working);
   const isWaiting = Boolean(t.needsApproval || t.status === 'waiting_approval');
+  const isJustFinished = !isWorking && !isWaiting && (Date.now() - (t.mtimeMs || 0) < 60000);
 
   let statusTag = '';
   if (isWorking) {
     statusTag = '<span class="thread-status-tag tag-working" title="正在运行"><span class="status-pulse-dot"></span> 运行中</span>';
   } else if (isWaiting) {
     statusTag = '<span class="thread-status-tag tag-waiting" title="等待批准">✋ 需批准</span>';
+  } else if (isJustFinished) {
+    statusTag = '<span class="thread-status-tag tag-finished" title="刚刚完成">✓ 刚刚</span>';
   }
 
   return `
@@ -1643,7 +1646,7 @@ function enterNewChatState() {
   if (activeSessionTitle) activeSessionTitle.title = '新对话';
   document.querySelectorAll('.thread-item.active').forEach((el) => el.classList.remove('active'));
   if (chatFeed) {
-    chatFeed.innerHTML = '<div class="empty-state"><div class="empty-icon"><img src="icons/codesk-app.png?v=3.38.0" alt=""></div><h2>新对话</h2><p>输入指令开始。标题会在首轮对话后自动生成，也可双击侧栏会话重命名。</p></div>';
+    chatFeed.innerHTML = '<div class="empty-state"><h2>新对话</h2><p>输入指令开始。标题会在首轮对话后自动生成，也可双击侧栏会话重命名。</p></div>';
   }
 }
 
@@ -1956,7 +1959,7 @@ function renderThreadDetail(data, opts = {}) {
   }
 
   if (!items || items.length === 0) {
-    chatFeed.innerHTML = '<div class="empty-state"><div class="empty-icon"><img src="icons/codesk-app.png?v=3.38.0" alt=""></div><h2>当前会话还没有消息</h2><p>在下方输入指令，开始这段对话。</p></div>';
+    chatFeed.innerHTML = '<div class="empty-state"><h2>当前会话还没有消息</h2><p>在下方输入指令，开始这段对话。</p></div>';
     return;
   }
 
@@ -2028,7 +2031,7 @@ function renderThreadDetail(data, opts = {}) {
   }
 
   if (renderedNodes.length === 0) {
-    chatFeed.innerHTML = '<div class="empty-state"><div class="empty-icon"><img src="icons/codesk-app.png?v=3.38.0" alt=""></div><h2>当前会话还没有有效消息</h2><p>在下方输入指令，开始这段对话。</p></div>';
+    chatFeed.innerHTML = '<div class="empty-state"><h2>当前会话还没有有效消息</h2><p>在下方输入指令，开始这段对话。</p></div>';
     return;
   }
 
@@ -2309,9 +2312,14 @@ function renderDesktopFeedNodes(items, toolOutputs) {
       const html = combinedText ? renderMarkdown(combinedText) : '';
       const visible = html.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
       if (visible) {
+        const isVeryLong = combinedText.split('\n').length > 18 || combinedText.length > 800;
         nodes.push(`
-          <div class="assistant-flow-block">
+          <div class="assistant-flow-block" data-raw-text="${escapeHtml(combinedText)}">
             <div class="markdown-body">${html}</div>
+            <div class="assistant-action-bar">
+              ${isVeryLong ? '<button type="button" class="assistant-action-btn btn-toggle-assistant" data-action="toggle-assistant-fold">˄ 收起长文</button>' : ''}
+              <button type="button" class="assistant-action-btn btn-copy-assistant" data-action="copy-assistant" title="复制完整回答">⎘ 复制</button>
+            </div>
           </div>
         `);
       }
@@ -2744,8 +2752,10 @@ function cleanText(text) {
 
 const markdownCache = new Map();
 const FILE_REF_EXT = 'md|txt|json|py|js|mjs|cjs|ts|tsx|jsx|rs|toml|html|css|yml|yaml|csv|xml|log|mdc';
-const ABS_FILE_SRC = String.raw`(?:file:/{2,3}[^\s)\]<>"'\\\`]+|[A-Za-z]:[\\/][^\s)\]<>"'\\\`]+\.(?:${FILE_REF_EXT}))`;
+const IMAGE_REF_EXT = 'png|jpe?g|gif|webp|bmp|ico';
+const ABS_FILE_SRC = String.raw`(?:file:/{2,3}[^\s)\]<>"'\\\`]+|[A-Za-z]:[\\/][^\s)\]<>"'\\\`]+\.(?:${FILE_REF_EXT}|${IMAGE_REF_EXT}))`;
 const FILE_NAME_RE = new RegExp(String.raw`^[^\\/:*?"<>|\s]+\.(?:${FILE_REF_EXT})$`, 'i');
+const IMAGE_NAME_RE = new RegExp(String.raw`\.(?:${IMAGE_REF_EXT})$`, 'i');
 let fileNameMap = new Map();
 
 function stripMemCitation(text) {
@@ -2780,6 +2790,28 @@ function looksLikeFileRef(s) {
   if (isAbsFilePath(t)) return true;
   if (FILE_NAME_RE.test(t)) return true;
   return /[\\/]/.test(t) && new RegExp(String.raw`\.(?:${FILE_REF_EXT})$`, 'i').test(t);
+}
+
+function isImageRef(s) {
+  const t = stripFileUrl(s).split(/[?#]/)[0];
+  return Boolean(t) && IMAGE_NAME_RE.test(t);
+}
+
+function isLocalDiskRef(ref) {
+  const raw = String(ref || '').trim();
+  if (!raw || /^(https?:|data:|blob:|#|javascript:)/i.test(raw)) return false;
+  if (raw.startsWith('/api/file')) return false;
+  const t = stripFileUrl(raw);
+  if (raw.startsWith('file:') || isAbsFilePath(t)) return true;
+  if (looksLikeFileRef(t)) return true;
+  return isImageRef(t) && /[\\/]/.test(t);
+}
+
+function hubFileUrl(fullPath, raw) {
+  const qs = new URLSearchParams({ path: stripFileUrl(fullPath) });
+  if (currentCwd) qs.set('cwd', currentCwd);
+  if (raw) qs.set('raw', '1');
+  return `/api/file?${qs.toString()}`;
 }
 
 function registerFilePath(p) {
@@ -2846,9 +2878,16 @@ function makeFileLink(fullPath, label) {
   return `<a class="file-link-inline" title="${escapeHtml(clean)}" data-file-path="${escapeHtml(clean)}"><span class="file-link-text">${escapeHtml(text)}</span></a>`;
 }
 
+function makeInlineImage(fullPath, alt) {
+  const clean = resolveFileRef(fullPath);
+  const src = hubFileUrl(clean, true);
+  const altText = String(alt || '').replace(/<[^>]+>/g, '').trim() || fileBasename(clean);
+  return `<a class="file-link-inline file-link-image" title="${escapeHtml(clean)}" data-file-path="${escapeHtml(clean)}"><img class="chat-inline-img" src="${escapeHtml(src)}" alt="${escapeHtml(altText)}" loading="lazy"></a>`;
+}
+
 function alreadyInsideFileAttr(html, offset) {
-  const before = html.slice(Math.max(0, offset - 24), offset);
-  return /(?:data-file-path|title|href)=["']?$/.test(before);
+  const before = html.slice(Math.max(0, offset - 64), offset);
+  return /(?:data-file-path|title|href|src|alt)=["']?$/.test(before);
 }
 
 function renderUserPrompt(text) {
@@ -2872,8 +2911,15 @@ function renderMarkdown(text) {
     html = escapeHtml(text);
   }
 
+  html = html.replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi, (match, src) => {
+    if (!isLocalDiskRef(src)) return match;
+    const alt = (match.match(/\balt=["']([^"']*)["']/i) || [])[1] || '';
+    return makeInlineImage(src, alt);
+  });
+
   html = html.replace(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>(.*?)<\/a>/gi, (match, href, innerText) => {
-    if (href.startsWith('file:') || isAbsFilePath(href) || looksLikeFileRef(stripFileUrl(href))) {
+    if (href.startsWith('file:') || isAbsFilePath(href) || looksLikeFileRef(stripFileUrl(href)) || isLocalDiskRef(href)) {
+      if (isImageRef(href) && isLocalDiskRef(href)) return makeInlineImage(href, innerText);
       return makeFileLink(resolveFileRef(href), innerText);
     }
     return match;
@@ -2881,12 +2927,15 @@ function renderMarkdown(text) {
 
   html = html.replace(/<code>([^<]+)<\/code>/gi, (match, inner) => {
     const ref = String(inner || '').trim();
+    if (!looksLikeFileRef(ref) && !isLocalDiskRef(ref)) return match;
+    if (isImageRef(ref) && isLocalDiskRef(ref)) return makeInlineImage(ref, fileBasename(ref));
     if (!looksLikeFileRef(ref)) return match;
     return makeFileLink(resolveFileRef(ref), fileBasename(ref));
   });
 
   html = html.replace(new RegExp(ABS_FILE_SRC, 'gi'), (match, offset, str) => {
     if (alreadyInsideFileAttr(str, offset)) return match;
+    if (isImageRef(match)) return makeInlineImage(match);
     return makeFileLink(match);
   });
 
@@ -2950,7 +2999,7 @@ async function openFileModal(filePath) {
           </div>
         `;
       } else if (isMd) {
-        const renderedHtml = typeof marked !== 'undefined' ? marked.parse(data.content) : escapeHtml(data.content);
+        const renderedHtml = renderMarkdown(data.content);
         fileModalBody.innerHTML = `
           <div class="file-preview-banner">
             <span>✨ Markdown 文档渲染引擎</span>
@@ -3803,6 +3852,21 @@ document.addEventListener('click', (e) => {
           group.classList.toggle('collapsed', !isHidden);
           if (arrow) arrow.textContent = isHidden ? '▴' : '▾';
         }
+      }
+    } else if (action === 'copy-assistant') {
+      const block = actionEl.closest('.assistant-flow-block');
+      const raw = block ? (block.getAttribute('data-raw-text') || block.querySelector('.markdown-body')?.innerText || '') : '';
+      if (raw) {
+        navigator.clipboard.writeText(raw).then(() => {
+          actionEl.textContent = '✓ 已复制';
+          setTimeout(() => { actionEl.textContent = '⎘ 复制'; }, 1500);
+        });
+      }
+    } else if (action === 'toggle-assistant-fold') {
+      const block = actionEl.closest('.assistant-flow-block');
+      if (block) {
+        const isCollapsed = block.classList.toggle('collapsed-long-msg');
+        actionEl.textContent = isCollapsed ? '˅ 展开全文' : '˄ 收起长文';
       }
     }
     return;

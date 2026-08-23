@@ -22,6 +22,35 @@ export type Project = {
   threads: Thread[];
 };
 
+export type SkillInfo = {
+  name: string;
+  path?: string;
+  enabled?: boolean;
+  description?: string;
+  shortDescription?: string;
+};
+
+export type McpServerInfo = {
+  name: string;
+  authStatus?: string | null;
+  needsAuth?: boolean;
+  toolCount?: number;
+  tools?: string[];
+  error?: string | null;
+};
+
+export type PluginInfo = {
+  id: string;
+  name: string;
+  marketplace?: string;
+  enabled?: boolean;
+  displayName?: string;
+  description?: string;
+  category?: string;
+  mention?: string;
+  needsDesktopUi?: boolean;
+};
+
 export type Approval = {
   requestId: string;
   ids?: string[];
@@ -55,6 +84,7 @@ export type TokenUsage = {
   maxContext?: number;
   resetAtMs?: number;
   planType?: string;
+  sources?: { label: string; percent: number }[];
 };
 
 export type ThreadHistory = {
@@ -63,10 +93,13 @@ export type ThreadHistory = {
   pendingApproval: { id?: string; ids?: string[]; command?: string; reason?: string; type?: string; at?: number } | null;
   activeActionText: string;
   cwd: string;
+  lockHolder?: 'desktop' | 'hub' | null;
+  subagents?: { id: string; title?: string; status?: string; cwd?: string }[];
   tokenUsage?: TokenUsage;
   rev?: number;
   totalItems?: number;
   hasMore?: boolean;
+  full?: boolean;
 };
 
 export type TreeNode = {
@@ -74,17 +107,28 @@ export type TreeNode = {
   type: 'file' | 'directory';
   path: string;
   ext?: string;
+  hasChildren?: boolean;
   children?: TreeNode[];
 };
 
 export type TimelineNode = {
   id: string;
-  kind: 'user' | 'assistant' | 'system' | 'diff' | 'command';
+  kind: 'user' | 'assistant' | 'system' | 'diff' | 'command' | 'reasoning' | 'agent';
   text: string;
   path?: string;
   add?: number;
   del?: number;
   patch?: string;
+};
+
+export type FailedSend = {
+  id: string;
+  threadId: string;
+  text: string;
+  input?: unknown[];
+  working: boolean;
+  kind: 'message' | 'command';
+  error: string;
 };
 
 export type Bubble = TimelineNode;
@@ -113,13 +157,15 @@ export type HubConfig = {
   model?: string;
   rawModel?: string;
   effort?: string;
+  speed?: string;
+  rawSpeed?: string;
   accessMode?: string;
 };
 
 export const ACCESS_MODES = {
-  ask: { label: '请求批准', icon: '✋' },
-  auto: { label: '帮我批准', icon: '🛡️' },
-  full: { label: '完全访问', icon: '⚡' },
+  ask: { label: '变更前确认', shortLabel: '确认', icon: '✋', hint: '改文件或跑命令前先问我。' },
+  auto: { label: '帮我批准', shortLabel: '自动', icon: '🛡️', hint: '常见操作自动过，有风险再问。' },
+  full: { label: '完全访问', shortLabel: '完全', icon: '⚡', hint: '少确认，直接改文件和上网。' },
 } as const;
 
 export type AccessModeId = keyof typeof ACCESS_MODES;
@@ -132,6 +178,7 @@ export function accessMeta(mode?: string) {
 export function applyConfigPatch(prev: HubConfig, key: string, value: string): HubConfig {
   if (key === 'model') return { ...prev, model: value, rawModel: value };
   if (key === 'effort') return { ...prev, effort: value };
+  if (key === 'speed') return { ...prev, speed: value, rawSpeed: value };
   if (key === 'permission') return { ...prev, accessMode: value };
   return prev;
 }

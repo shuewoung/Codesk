@@ -1,5 +1,48 @@
 export const HUB_PORT = 18990;
+export const EXPO_WEB_PORT = 18991;
+export const LOCAL_HUB_URL = `http://127.0.0.1:${HUB_PORT}`;
 export const DISCOVER_TIMEOUT_MS = 800;
+export const RELAY_PAGE_HOSTS = ['hub.codesk.icu'];
+
+export type LanProbeEnv = { os?: string; hostname?: string; port?: string };
+
+export function isRelayPageHost(hostname?: string): boolean {
+  const host = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  return RELAY_PAGE_HOSTS.includes(host);
+}
+
+function runtimeLanProbeEnv(): LanProbeEnv {
+  const env: LanProbeEnv = {};
+  try {
+    const { Platform } = require('react-native') as { Platform?: { OS?: string } };
+    env.os = String(Platform?.OS || '');
+  } catch {
+    env.os = '';
+  }
+  try {
+    const loc = (globalThis as { location?: { hostname?: string; port?: string } }).location;
+    if (loc?.hostname) {
+      env.hostname = loc.hostname;
+      env.port = loc.port || '';
+    }
+  } catch {
+    /* native */
+  }
+  return env;
+}
+
+export function canLanProbe(env?: LanProbeEnv): boolean {
+  const merged = { ...runtimeLanProbeEnv(), ...env };
+  const os = String(merged.os || '');
+  if (os === 'ios' || os === 'android') return true;
+  if (os !== 'web') return false;
+  const hostname = String(merged.hostname || '');
+  const port = String(merged.port || '');
+  if (!hostname) return false;
+  if (port === String(HUB_PORT)) return false;
+  if (isRelayPageHost(hostname)) return false;
+  return true;
+}
 
 export type DiscoverHit = { url: string; hubId?: string };
 
@@ -31,10 +74,15 @@ export function normalizeHubUrl(raw: string): string {
   return `https://${trimmed}`;
 }
 
-export function pageContext(): { origin?: string; hostname?: string } {
+export function pageContext(): { origin?: string; hostname?: string; port?: string; protocol?: string } {
   try {
     if (typeof window !== 'undefined' && window.location?.hostname) {
-      return { origin: window.location.origin, hostname: window.location.hostname };
+      return {
+        origin: window.location.origin,
+        hostname: window.location.hostname,
+        port: window.location.port || '',
+        protocol: window.location.protocol,
+      };
     }
   } catch {
     /* native */
@@ -51,6 +99,72 @@ export function pageContext(): { origin?: string; hostname?: string } {
     /* ignore */
   }
   return {};
+}
+
+export function sameHostHubUrl(opts?: { hostname?: string; protocol?: string }): string {
+  const ctx = pageContext();
+  const hostname = String(opts?.hostname || ctx.hostname || '').replace(/^\[|\]$/g, '');
+  if (!hostname || isRelayPageHost(hostname)) return '';
+  const protocol = String(opts?.protocol || ctx.protocol || '').trim() || 'http:';
+  const secure = protocol === 'https:' && !isLoopbackHost(hostname) && !isPrivateIPv4(hostname) && !isCgNatIPv4(hostname);
+  return `${secure ? 'https' : 'http'}://${hostname}:${HUB_PORT}`;
+}
+
+export function isCgNatIPv4(host: string): boolean {
+  const m = String(host || '').trim().match(/^100\.(\d{1,3})(?:\.\d{1,3}){2}$/);
+  if (!m) return false;
+  const n = Number(m[1]);
+  return n >= 64 && n <= 127;
+}
+
+export function isPublicPageHost(host: string): boolean {
+  const hostname = String(host || '').replace(/^\[|\]$/g, '');
+  if (!hostname || isRelayPageHost(hostname)) return false;
+  if (isLoopbackHost(hostname) || isPrivateIPv4(hostname) || isCgNatIPv4(hostname)) return false;
+  return true;
+}
+
+function publicPageOrigin(opts?: { hostname?: string; port?: string; protocol?: string; origin?: string }): string {
+  const ctx = pageContext();
+  const origin = stripSlash(opts?.origin || ctx.origin || '');
+  if (origin) return origin;
+  const hostname = String(opts?.hostname || ctx.hostname || '').replace(/^\[|\]$/g, '');
+  if (!hostname) return '';
+  const protocol = String(opts?.protocol || ctx.protocol || 'https:');
+  const port = String(opts?.port || ctx.port || '');
+  const skipPort = !port || port === '80' || port === '443';
+  return `${protocol}//${hostname}${skipPort ? '' : `:${port}`}`;
+}
+
+export function pageHubUrl(opts?: { hostname?: string; port?: string; protocol?: string; origin?: string }): string {
+  const ctx = pageContext();
+  const hostname = String(opts?.hostname || ctx.hostname || '').replace(/^\[|\]$/g, '');
+  const port = String(opts?.port || ctx.port || '');
+  if (!hostname || isRelayPageHost(hostname)) return '';
+  if (port === String(HUB_PORT)) {
+    const origin = stripSlash(opts?.origin || ctx.origin || '');
+    if (origin) return origin;
+  }
+  if (isPublicPageHost(hostname)) return publicPageOrigin({
+    hostname,
+    port,
+    protocol: opts?.protocol || ctx.protocol,
+    origin: opts?.origin || ctx.origin,
+  });
+  if (isLoopbackHost(hostname)) return LOCAL_HUB_URL;
+  return sameHostHubUrl({ hostname, protocol: opts?.protocol || ctx.protocol });
+}
+
+export function isColocatedWebShell(env?: LanProbeEnv): boolean {
+  const merged = { ...runtimeLanProbeEnv(), ...env };
+  if (String(merged.os || '') !== 'web') return false;
+  return !isRelayPageHost(merged.hostname);
+}
+
+export async function findColocatedHub(): Promise<DiscoverHit | null> {
+  const url = pageHubUrl();
+  if (!url) return null;
+  return probeHub(url);
 }
 
 export function candidateHubUrls(opts: {

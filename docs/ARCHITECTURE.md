@@ -2,7 +2,7 @@
 
 ## 本仓定位
 
-Codesk：本机已登录 Codex 的远程控制面。手机/平板入口是 `apps/web-hub`（自有 PWA）。多端拆分与中继定义见 `docs/product/`。
+Codesk：本机已登录 Codex 的远程控制面。PWA 在 `apps/web/`，Hub 在 `apps/web-hub/server/`，Expo 在 `apps/mobile/`。多端拆分与中继定义见 `docs/product/`。
 
 | 层 | 实现 | 说明 |
 |---|---|---|
@@ -45,5 +45,6 @@ Codesk：本机已登录 Codex 的远程控制面。手机/平板入口是 `apps
 | 服务 | 地址 |
 |---|---|
 | Web Hub | `18990`（可局域网） |
+| Expo Web / Metro | `18991` |
 | 原版 UI | `127.0.0.1:8214` |
 | `codex-ipc` | `\\.\pipe\codex-ipc`（只本机） |

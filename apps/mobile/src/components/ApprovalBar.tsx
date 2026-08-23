@@ -7,21 +7,29 @@ import { useTheme } from '../theme-context';
 export function ApprovalBar({
   approval,
   onDecide,
+  lockHolder,
 }: {
   approval: Approval;
   onDecide: (decision: Decision) => void;
+  lockHolder?: 'desktop' | 'hub' | null;
 }) {
   const { colors } = useTheme();
   const detail = decodeApprovalCommand(approval.command || '') || approval.reason || '检测到需要您确认的审批请求。';
+  const lockNote = lockHolder === 'desktop'
+    ? '点完后交给电脑上的 Codex 继续。若桌面还弹窗，请在电脑上再确认一次。'
+    : lockHolder === 'hub'
+      ? 'Hub 会代批，不必开桌面。'
+      : '桌面开着时由电脑继续；没开桌面则 Hub 代批。';
   return (
     <View style={[styles.wrap, { backgroundColor: colors.bg, borderColor: '#f59e0b' }]}>
       <View style={styles.headerRow}>
         <Text style={{ fontSize: 16 }}>🛡️</Text>
-        <Text style={[styles.title, { color: colors.text }]}>需要权限审批 (Waiting for Approval)</Text>
+        <Text style={[styles.title, { color: colors.text }]}>需要权限审批</Text>
       </View>
       <Text style={[styles.detail, { color: colors.muted }]} numberOfLines={4} selectable>
         {detail}
       </Text>
+      <Text style={{ color: colors.muted, fontSize: 12, lineHeight: 17 }}>{lockNote}</Text>
       <View style={styles.actionsRow}>
         <Pressable
           style={[styles.btn, { backgroundColor: '#10b981' }]}

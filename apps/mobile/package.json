@@ -1,6 +1,6 @@
 {
   "name": "codesk-mobile",
-  "version": "1.0.0",
+  "version": "1.0.11",
   "main": "index.ts",
   "dependencies": {
     "@expo/metro-runtime": "~6.1.2",
@@ -26,16 +26,20 @@
   },
   "devDependencies": {
     "@types/react": "~19.1.10",
+    "eslint": "^9.39.5",
+    "eslint-config-expo": "~10.0.0",
     "tsx": "^4.23.12",
     "typescript": "~5.9.2"
   },
   "scripts": {
-    "start": "expo start",
+    "start": "expo start --port 18991 --host lan",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "web": "expo start --web",
+    "web": "expo start --web --port 18991 --host lan",
+    "export:web": "node scripts/export-web.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/protocol.test.ts src/history.test.ts src/api.test.ts src/discover.test.ts src/push.test.ts test/relay-client.test.ts"
+    "lint": "eslint .",
+    "test": "tsx --test src/protocol.test.ts src/history.test.ts src/workspace.test.ts src/quota.test.ts src/handshake.test.ts src/api.test.ts src/discover.test.ts src/push.test.ts src/thread-route.test.ts test/relay-client.test.ts scripts/hub-proxy.test.mjs"
   },
   "private": true
 }

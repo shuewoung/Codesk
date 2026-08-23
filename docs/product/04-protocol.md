@@ -11,13 +11,16 @@
 | GET | `/api/threads` | 列表 + config + quota |
 | POST | `/api/threads` | 新建 |
 | POST | `/api/threads/rename` | 重命名 |
+| POST | `/api/threads/pin` | 置顶/取消置顶。`{ id, kind: "thread"\|"project", pinned }`。先写入 `pins.jsonl` sidecar，安全时再物化到 Desktop |
+| POST | `/api/threads/archive` | 归档/取消归档。`{ id, archived }`。先写入 `archives.jsonl` sidecar，安全时再写 sqlite `threads.archived` |
 | GET | `/api/thread-history` | `threadId` `all` `baseRev` |
 | GET | `/api/workspace-tree` | `cwd` |
-| GET | `/api/file` | `path` `cwd` |
+| GET | `/api/file` | `path` `cwd` 可选 `raw=1` |
 | POST | `/api/upload` | 附件 |
 | GET | `/api/models` | 模型 |
 | GET/POST | `/api/skills` `/api/skills/config` | 技能 |
 | GET/POST | `/api/mcp-servers` `.../reload` | MCP |
+| GET/POST | `/api/plugins` `/api/plugins/config` | 已安装插件列表；POST `{ id, enabled }` 写 `config.toml` |
 | GET | `/api/search` | 会话内搜索 |
 | GET/POST | `/api/push/public-key` `/api/push/subscribe` | 本机 PWA Web Push |
 
@@ -34,6 +37,7 @@
 | GET | `/api/host/status` `/api/host/clients` `/api/host/pair-code` | 本机主机台，仅 127.0.0.1 |
 | POST | `/api/host/kick` | `{ kind: "lan"|"relay", id }` 踢客户端，仅 127.0.0.1 |
 | POST | `/api/host/lan-code` | `{ code }` 设 4 位家里码；空则随机。仅 127.0.0.1 |
+| POST | `/api/host/sync-pins` | 尝试把 sidecar pin 物化进 Desktop `global-state.json` / sqlite。仅 127.0.0.1。Desktop 正在跑时返回 `pending`，不抢 writer |
 
 中继新增（仅 VPS）：
 
@@ -47,14 +51,17 @@
 
 ### 本机鉴权
 
-- 本机打开 `http://127.0.0.1:18990` / `http://localhost:18990`：回环且 Origin 为空或同端口，视为已登录，不需要配对码或口令。局域网 IP 与中继仍要码。
+- 本机打开 `http://127.0.0.1:18990` / `http://localhost:18990`，或本机 Expo Web `http://127.0.0.1:18991` / `http://localhost:18991`：回环且 Origin 为空、Hub 端口或 Expo Web 端口 `18991`，视为已登录，不需要配对码或口令。局域网 IP 与中继仍要码。不要信任其它本机端口。
 - 未登录：除 `/api/auth/login` `/api/auth/logout` `/api/auth/status` `/api/discover` 和静态资源外，所有 `/api/*` 返回 `401`；WS 升级拒绝。
+- Cloudflare Tunnel / Zero Trust 进来的请求（带 `CF-Connecting-IP`、`Cf-Access-Jwt-Assertion`、`X-Forwarded-For`、`X-Forwarded-Proto` 等）不算本机回环，不能免登录。主机台 `/host` 同样拒绝。
+- 公网域名打开 Expo Web（隧道指到 `:18991`，如 `https://cds.zhangsw.work`）时，Hub 地址是**当前页同源**，不要再拼公网 `:18990`。Expo HTTP 服务器在 CORS 之前把 `/api` 和 `/api/ws` 转到本机 Hub `:18990`，并转发 `X-Forwarded-*` / `CF-*`。家里直连 WS 用 `/api/ws?token=`。局域网 IP 上的 Expo Web 仍连同主机 `:18990`。Cloudflare Access 若挡 WebSocket，页面能开也会连不上服务。
+- `GET /api/file?raw=1`：仅 png/jpg/gif/webp/bmp/ico，返回图像字节（给同源 `<img>`）。鉴权与普通 `/api/file` 相同。对话里的本机绝对路径由 Web 改写成这个 URL，不走中继。
 - 未登录不得读 `~/.codex`、不得跑命令、不得上传。
 - Cookie 名仍是 `onedesk_session`（兼容已配对设备），`Path=/`，`HttpOnly`，`SameSite=Lax`。HTTP 与 WS 同一套：Cookie、`Authorization: Bearer <session|口令>`，或 query `?token=<session>`。对外产品名是 Codesk，协议字段不改。
 - 浏览器 WebSocket 不能自定义头。Expo Web / 跨端口页面连局域网 Hub 时用 `ws://<hub>/?token=<session>`。Hub 与中继都认 query token。
 - `GET /api/auth/status` → `{ success, loggedIn, configured, hubId, relay: { configured, online, url } }`。不要返回 `hubSecret`、口令、`auth.json`。
 - `GET /api/discover` → `{ ok: true, hub: true, port, hubId }`。未登录可访问。不要返回口令、配对码、`hubSecret`、密钥。`port` 是当前监听端口。
-- 局域网跨 Origin（至少开发态 Expo Web，如 `http://localhost:8081`、`http://127.0.0.1:8081`，以及 `http(s)://<私网IP>:<任意端口>`）允许 CORS：反射允许的 `Origin`，`GET`/`POST`/`OPTIONS`，允许 `Content-Type` 与 `Authorization`。不允许任意公网 Origin。不要把口令或配对码放进 CORS 响应。
+- 局域网跨 Origin（至少开发态 Expo Web，如 `http://localhost:18991`、`http://127.0.0.1:18991`，以及 `http(s)://<私网IP>:<任意端口>`）允许 CORS：反射允许的 `Origin`，`GET`/`POST`/`OPTIONS`，允许 `Content-Type` 与 `Authorization`。不允许任意公网 Origin。不要把口令或配对码放进 CORS 响应。
 - `GET /api/auth/pair-code` → `{ success, code, expiresAtMs, relayOnline, pairUrl, hubE2ePub }`。
 - `pairUrl` 给手机扫**出门码**：`http(s)://<中继>/?pair=<code>&hk=<hubE2ePub>&lan=<hubLanUrl>`。`hk` 是 Hub 长期公钥。`lan` 是 Hub 当前局域网地址（如 `http://192.168.1.8:18990`）。
 - **两套码不要混：** 家里码 = Hub 常驻 `lanCode`，只 `POST <hub>/api/auth/login`。出门码 = 中继一次性 `pair`，只 `POST /api/relay/pair`。主机台左边是家里，右边是出门。手输必须让用户选哪一种。
@@ -62,13 +69,49 @@
 
 ### WebSocket 应用消息（已有，禁止改名）
 
-客户端 → 服务端：`get_threads` `get_config` `update_config` `create_thread` `rename_thread` `get_thread_history` `send_message` `send_steer` `send_stop` `send_approval` `get_file` `get_models` `get_workspace_tree` `upload_file` `search_thread` `register_push` `get_goal` `set_goal`
+客户端 → 服务端：`get_threads` `get_config` `update_config` `create_thread` `rename_thread` `pin_item` `pin_thread` `unpin_thread` `archive_item` `archive_thread` `unarchive_thread` `get_thread_history` `send_message` `send_steer` `send_stop` `send_approval` `get_file` `get_models` `get_workspace_tree` `upload_file` `search_thread` `register_push` `get_goal` `set_goal` `get_skills` `set_skill` `get_mcp` `reload_mcp` `get_plugins` `set_plugin` `search_workspace` `list_artifacts` `stop_command`
 
-服务端 → 客户端：`thread_list` `config_data` `thread_created` `thread_renamed` `thread_history` `thread_update` `approval_request` `action_feedback` `ping` `file_data` `models_list` `workspace_tree` `upload_result` `search_results` `goal_data`
+服务端 → 客户端：`thread_list` `config_data` `thread_created` `thread_renamed` `thread_history` `thread_update` `approval_request` `action_feedback` `ping` `file_data` `models_list` `workspace_tree` `upload_result` `search_results` `goal_data` `skills_list` `mcp_list` `plugins_list` `workspace_search` `artifacts_list`
 
-`send_approval` 可带可选 `kind`（`command` / `file` / `permissions`，或 app-server 方法名）。`decision`：`accept` | `acceptForSession` | `denied`（Hub 归一化，不改消息名）。有活锁时 Hub 走 follower；无活锁仍走本端 `decideApproval`。
+`action_feedback` 把一次操作的结果对回客户端：
 
-`/` 菜单不要放分享、侧边、聊天分支、反馈、宠物、用量计费、初始化、推理、快速、新聊天、星标、模型、状态、记忆、重命名。现有项：`/compact` `/plan` 当普通 `send_message`；`/mcp` 打开已有菜单；`/goal` 打开目标面板（`get_goal` / `set_goal`，读写 `~/.codex/goals_1.sqlite`）。
+```json
+{ "type": "action_feedback", "status": "success"|"error", "threadId": "...", "action": "send"|"steer"|"command"|"create_thread", "interim": false, "message": "..." }
+```
+
+- `threadId`、`action`：有则带。客户端用它们对上最后一次 `send_message` / `send_steer` / `run_command`，不要只靠文案。
+- `interim: true`：还在等桌面 owner、故意不抢锁。不是最终成功，不要清 lastOutgoing，不要当已经发出去。
+- `status: error` 且 `action` 为 `send` / `steer` / `command`：客户端应保留草稿并允许重试，不要只 toast 就丢。
+
+置顶走 sidecar，不抢 Desktop turn writer：
+
+```json
+{ "type": "pin_item", "kind": "thread"|"project", "id": "...", "pinned": true }
+{ "type": "pin_thread", "threadId": "...", "pinned": true }
+{ "type": "unpin_thread", "threadId": "..." }
+```
+
+- `pin_item` 是统一消息。`kind` 缺省 `thread`；`id` 也可用 `threadId` / `projectId`。
+- `pin_thread` / `unpin_thread` 是会话别名（`unpin` 视为 `pinned: false`）。
+- Hub 立即写入 `~/.codex/pins.jsonl` + 内存 override，广播 `thread_list`（`thread.isPinned` / `project.isPinned` / `pinnedOrder`）。Desktop 空闲（无 live turn、无新鲜 writer-lock、最好进程已退出）时再物化 `.codex-global-state.json` 的 `pinned-thread-ids` / `pinned-project-ids` / `unified-sidebar-pinned-order-v1`，并尝试 sqlite `threads.is_pinned`。
+- 失败只保 sidecar，用 `action_feedback` `{ action: "pin_item", status: "success"|"error" }` 回执；物化未完成不算错误。
+
+归档同一套路，只作用于会话：
+
+```json
+{ "type": "archive_item", "id": "...", "archived": true }
+{ "type": "archive_thread", "threadId": "..." }
+{ "type": "unarchive_thread", "threadId": "..." }
+```
+
+- Hub 立即写入 `~/.codex/archives.jsonl`，已归档会话从 `thread_list` 消失。
+- Desktop 空闲时写 sqlite `threads.archived`。Desktop 在 sqlite 里改归档时，Hub 按集合差分拉回 sidecar 并广播。
+
+`send_approval` 可带可选 `kind`（`command` / `file` / `permissions`，或 app-server 方法名）。`decision`：`accept` | `acceptForSession` | `denied`（Hub 归一化，不改消息名）。有活锁时 Hub `follow` 直播 snapshot，**JSON-RPC `requestId` 优先于 JSONL 条目 id**，`kind` 对不上则回退三种 follower 方法；无活锁仍走本端 `decideApproval`。
+
+`send_message` / `send_steer` 可带可选 `mode`：`plan` | `review`。`plan` 会传给 app-server / follower `collaborationMode: "plan"`。
+
+`/` 菜单不要放分享、侧边、聊天分支、反馈、宠物、用量计费、初始化、推理、快速、新聊天、星标、模型、状态、记忆、重命名。现有项：`/compact` 当普通 `send_message`；`/plan` `/review` 打开专用工作台（规划步骤 / 待审文件），再从页里发出；`/mcp` 打开已有菜单；`/goal` 打开目标面板（`get_goal` / `set_goal`，读写 `~/.codex/goals_1.sqlite`）。
 
 ### 命令面板 / 只读 Git（新增 type）
 
@@ -87,7 +130,7 @@
 { "type": "command_output", "threadId": "...", "runId": "...", "stream": "stdout", "chunk": "hi\n" }
 { "type": "command_output", "threadId": "...", "runId": "...", "stream": "stderr", "chunk": "" }
 { "type": "command_output", "threadId": "...", "runId": "...", "stream": "exit", "exitCode": 0, "signal": null, "cwd": "..." }
-{ "type": "git_status", "threadId": "...", "cwd": "...", "action": "all", "status": "", "diff": "", "log": "", "error": null }
+{ "type": "git_status", "threadId": "...", "cwd": "...", "action": "all", "status": "", "diff": "", "log": "", "files": [{ "path": "src/a.ts", "status": "M", "add": 1, "del": 1 }], "error": null }
 ```
 
 不是真 PTY。Git 只读，即使 Desktop 持锁也只读。
@@ -108,7 +151,8 @@
 - `encoding`：`utf8` 文本，`base64` 图片或二进制。单文件读取上限约 800KB，超出 `truncated=true`。
 - 找不到或读失败：`content` 为空，`error` 为短文案。
 - `thread_list` / `config_data` 可带可选 `hostName`（本机 Windows 计算机名）。没有就不传。
-- `get_models` 与 `GET /api/models` 同一份目录，含每模型 `supportedReasoningEfforts` / `defaultReasoningEffort`。当前选用的模型仍走 `get_config` / `update_config`（`key`: `model` | `effort` | `permission`）。思考强度选项跟当前模型走，不要写死。
+- `get_models` 与 `GET /api/models` 同一份目录，含每模型 `supportedReasoningEfforts` / `defaultReasoningEffort`。当前选用的模型仍走 `get_config` / `update_config`（`key`: `model` | `effort` | `permission` | `speed`）。思考强度选项跟当前模型走，不要写死。
+- `speed` 写入 `config.toml` 的 `service_tier`。取值：`default`（标准）| `fast`（快速）| `flex` | `priority`。`config_data` 带 `speed`。
 - `get_thread_history` 可带 `all: true` 拉更早记录（上限与 REST `?all=true` 相同）。默认只给尾部窗口。
 ```json
 { "type": "get_workspace_tree", "threadId": "...", "cwd": "" }
@@ -120,9 +164,30 @@
 { "type": "register_push", "vendor": "jpush", "registrationId": "..." }
 ```
 
-- `get_workspace_tree` 的 cwd 默认该 thread 工作目录；树深度与 REST `/api/workspace-tree` 相同（约 2 层）。
+- `get_workspace_tree` 的 cwd 默认该 thread 工作目录。可带 `path` 只列该目录的一层子项（`hasChildren` 表示还能展开）。REST `/api/workspace-tree?cwd=&path=` 相同。
+- `thread_list` / `thread_history` 可带 `lockHolder`: `"desktop"` | `"hub"` | 缺省空。desktop 表示 writer-lock / IPC owner 在桌面，远程审批走 follower。
 - `upload_file` 经中继，单文件解码后上限 4MB。成功后客户端把 `path` 放进 `send_message.input` 的 `localImage` 或 `mention`。更大文件仍走局域网 `POST /api/upload`。
 - `register_push`：原生 Android 把极光 `registrationId` 交给 **自己的 Hub**。Hub 再经出站连接发给中继 `push_register`。审批/任务完成时 Hub 发 `push_send`，由中继调极光 REST，只推该 Hub 名下的 RID。Master Secret 只在中继。Expo Go / Web 拿不到 RID。
+
+出门 Skill / MCP 走 WS（与 REST `/api/skills` `/api/mcp-servers` 同一份数据）：
+
+```json
+{ "type": "get_skills", "cwd": "" }
+{ "type": "skills_list", "skills": [{ "name": "...", "path": "...", "enabled": true, "description": "" }], "error": null }
+
+{ "type": "set_skill", "path": "...", "name": "...", "enabled": false }
+{ "type": "skills_list", "skills": [], "error": null }
+
+{ "type": "get_mcp" }
+{ "type": "mcp_list", "servers": [{ "name": "...", "authStatus": null, "needsAuth": false, "toolCount": 0, "tools": [] }], "error": null }
+
+{ "type": "get_plugins" }
+{ "type": "plugins_list", "plugins": [{ "id": "chrome@openai-bundled", "name": "chrome", "enabled": true, "displayName": "Chrome", "mention": "@chrome", "needsDesktopUi": true }], "error": null }
+{ "type": "set_plugin", "id": "chrome@openai-bundled", "enabled": false }
+
+{ "type": "reload_mcp" }
+{ "type": "mcp_list", "servers": [], "error": null }
+```
 
 ## 中继信封
 
@@ -161,24 +226,17 @@ Hub 出站、手机连 VPS，外层都是：
 
 禁止把 `auth.json`、Codex access token、本机口令、`hubSecret` 发给前端。`hubSecret` 只出现在 Hub→中继的 `register_hub`。
 
-## 连接策略（Web）
+## 连接策略
 
-1. 若用户选了局域网地址（或探测 `:18990` 成功）→ 直连 Hub
-2. 否则连 VPS WSS，`fwd` 到上次配对的 `hubId`
-3. 两种都失败 → 「主机离线」
+页面从哪来，就按哪条连。不要用探测去猜中继页。
 
-局域网探测只走 HTTP `GET /api/discover`（浏览器不能做 mDNS/UDP，也不扫 `1-254`）。顺序：
-
-1. 当前页已在 `:18990`，或 `origin` 就是 Hub → `window.location.origin`
-2. 上次登录成功的 `lanUrl`
-3. `http://127.0.0.1:18990`、`http://localhost:18990`
-4. `http://<当前页 hostname>:18990`（hostname 是局域网 IP 时；原生可用 Expo `debuggerHost`）
-5. 最多再试同网段 `.1` / `.2` 两三个常见地址。每地址超时约 400ms，失败静默。
-
-探测成功只自动填局域网地址并提示「已发现本机 Hub」，仍要用户输入电脑上的 4 位家里码再 `POST /api/auth/login`。不要自动登录、不要自动 pair。
+1. **Hub 托管的 PWA（`:18990`，源在 `apps/web/`）**：同源就是 Hub。不探测、不扫网、不走中继。回环免码；非回环只输 4 位家里码。
+2. **中继页（`hub.codesk.icu` 静态站）**：只出门码配对。禁止 `GET /api/discover`，禁止扫网段。
+3. **原生 App（iOS / Android）**：允许探测家里 Hub。
+4. **Expo Web（`:18991`）**：与 PWA 并行，不替换 `:18990` 的 PWA。Hub 地址 = 当前页的主机名 `:18990`。不要让用户填 IP。回环免码；从其他电脑打开只输 4 位家里码。页面 hostname 是中继域名时按第 2 条。
 
 出门时业务 REST 仍只打 Hub。页面若是中继静态站：会话走 WS 信封；`/api/file` 等 REST 仅在已选局域网地址时发往该 Hub。中继不代理业务 REST。
 
-正式壳是 Expo（`apps/mobile`，含 `npx expo start --web`）。旧 PWA 仍由 Hub 在 `:18990/` 提供，不要拆。开发态 Expo Web 与 Hub 不同端口，靠 CORS + 上述探测；下一步若要把 Expo 静态包挂到 Hub 做 same-origin，另开窗口。
+两套壳都保留：PWA（`apps/web/`，Hub / 中继托管）和 Expo（`apps/mobile/`，含 `npx expo start --web`）。不要拆掉 PWA。
 
 Web 入口 URL 只在 `connectWS()` / `apiUrl()` 拼接，不要写死公网 IP。未登录不拉 `/api/threads`。收到 `hub_offline` 或探测失败显示「主机离线」，不是无限转圈。

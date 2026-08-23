@@ -102,10 +102,47 @@ function runGitOnce(cwd, args) {
   });
 }
 
+export function parseGitFiles(status = '', diff = '') {
+  const map = new Map();
+  const add = (filePath, extra = {}) => {
+    const next = String(filePath || '').replace(/ -> .+$/, '').trim();
+    if (!next || next.endsWith('/')) return;
+    const prev = map.get(next) || { path: next, status: '', add: 0, del: 0 };
+    map.set(next, {
+      path: next,
+      status: extra.status || prev.status,
+      add: extra.add != null ? extra.add : prev.add,
+      del: extra.del != null ? extra.del : prev.del,
+    });
+  };
+  for (const line of String(status || '').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const porcelain = trimmed.match(/^([MADRCU?!]{1,2})\s+(.+)$/);
+    const named = trimmed.match(/^(modified|new file|deleted|renamed|untracked):\s+(.+)$/i);
+    const filePath = porcelain?.[2] || named?.[2] || '';
+    if (filePath) add(filePath, { status: porcelain?.[1] || named?.[1] || '' });
+  }
+  let current = '';
+  for (const line of String(diff || '').split('\n')) {
+    const git = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+    if (git) {
+      current = git[2] || git[1];
+      add(current);
+      continue;
+    }
+    const row = map.get(current);
+    if (!row) continue;
+    if (line.startsWith('+') && !line.startsWith('+++')) row.add += 1;
+    if (line.startsWith('-') && !line.startsWith('---')) row.del += 1;
+  }
+  return [...map.values()];
+}
+
 export async function runGitReadonly(cwd, action = 'all') {
   const workdir = assertExistingDir(cwd);
   const wanted = action === 'all' ? ['status', 'diff', 'log'] : [action];
-  const result = { cwd: workdir, action, status: '', diff: '', log: '', error: null };
+  const result = { cwd: workdir, action, status: '', diff: '', log: '', error: null, files: [] };
   for (const key of wanted) {
     const args = GIT_ACTIONS[key];
     if (!args) {
@@ -118,5 +155,6 @@ export async function runGitReadonly(cwd, action = 'all') {
     }
     result[key] = ran.stdout;
   }
+  result.files = parseGitFiles(result.status, result.diff);
   return result;
 }

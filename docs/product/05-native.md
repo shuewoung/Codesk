@@ -1,6 +1,6 @@
 # 5. Expo 客户端（窗口 4）
 
-PWA 已冻结在 `pwa-stable` / `master`（`a562688`）。本窗口只在 `feat/expo-client` 上**加**一个 Expo 应用，不改现有 PWA。
+日常电脑 UI 是 Expo Web `:18991`（大屏三栏）。Hub `:18990` 在 18991 在跑时会 302 过去。本窗口只改 `apps/mobile/`。出门 Skill / MCP 走 WS `get_skills` / `get_mcp`。
 
 ## 是什么
 
@@ -12,7 +12,7 @@ PWA 已冻结在 `pwa-stable` / `master`（`a562688`）。本窗口只在 `feat/
 
 | 端 | 目录 | 命运 |
 |---|---|---|
-| PWA | `apps/web-hub/public/` | 保留，本窗口禁止改 |
+| PWA | `apps/web/` | 保留，本窗口禁止改 |
 | Hub | `apps/web-hub/server/` | 保留，本窗口禁止改 |
 | 中继 | `apps/relay/` | 保留，本窗口禁止改 |
 | Expo | `apps/mobile/` | 正式壳（Android / iOS / `expo start --web`） |
@@ -30,7 +30,7 @@ PWA 已冻结在 `pwa-stable` / `master`（`a562688`）。本窗口只在 `feat/
 2. **Expo，不是安卓原生，也不是先写安卓再移植。**
 3. **不 fork Happy。** 不接他们的 `sync/`、socket.io、E2E、`happy` CLI。手感可以像，数据层必须是我们的协议。
 4. **旧 PWA 不删不搬。** 中继协议不改。Hub 可按 [04-protocol.md](04-protocol.md) 增加未登录 `GET /api/discover`、局域网 CORS、以及 WS `?token=`（浏览器不能自定义头）。原生 WS 仍可用 `Authorization: Bearer <deviceToken>`。
-5. **出门走中继，家里直连 Hub。** 配对页两套入口。不要 WebRTC。
+5. **出门走中继，家里直连 Hub。** 原生 App 配对页两套入口。不要 WebRTC。日常浏览器走 Expo Web `:18991`；Hub `:18990` 是协议 + 主机台，探测到 18991 会把工作台重定向过去。回环免码；从其他电脑打开 Expo Web 时 Hub 用当前主机 `:18990`，只输家里码，不填 IP。公网隧道打开 Expo Web 时用当前页同源（Metro 转到 Hub），不要拼 `:18990`。`hub.codesk.icu` 中继页禁止探测。
 6. **token 用 SecureStore。** 扫一次，以后打开自动连。退出才 `POST /api/relay/revoke`。
 7. **电脑休眠 = 主机离线。** 不做离线消息队列。
 8. **Claude Code / OpenCode 页签本窗口不做。**
@@ -105,11 +105,11 @@ PWA 已冻结在 `pwa-stable` / `master`（`a562688`）。本窗口只在 `feat/
 |---|---|
 | 配对 | 手输 / 扫 `/?pair=`，SecureStore 记 token |
 | 中继 WSS | `fwd` 信封、断线重连、`hub_offline` |
-| 会话 | 按项目分组、搜索、新聊天 `create_thread` |
+| 会话 | 按项目分组、搜索、新聊天 `create_thread`；当前对话可开同目录「辅助会话」（不抢 Desktop 主会话锁） |
 | 聊天 | 发消息、运行中 `send_steer`、停止、审批三按钮 |
 | 展示 | Markdown、改文件卡、命令卡；点路径 `get_file` 预览 |
 | 模型 | 底栏芯片：模型 / 推理 / 权限 |
-| 会话顶栏 | 上下文环、项目+绿/红点+主机、⋯ 置顶/复制ID/重命名/归档 |
+| 会话顶栏 | 上下文环、项目+绿/红点+主机、⋯ 置顶/复制ID/重命名/开辅助会话/归档 |
 | 设置 | 浅/深色、中继 URL、hubId、访问权限、退出吊销 |
 | 导航 | 左栏会话（项目可折叠/置顶/最近），右栏文件树 |
 | 附件 | 拍照 / 选图 / 选文件，经 `upload_file` 再随消息发出 |
@@ -122,7 +122,7 @@ PWA 已冻结在 `pwa-stable` / `master`（`a562688`）。本窗口只在 `feat/
 ## 以后可加（按性价比）
 
 0. **出门 E2E** 扫 `hk`、握手、`fwd.enc`（[06-e2e.md](06-e2e.md)）——与审批同为必须
-1. **斜杠命令** `/review` `/compact` 当普通 `send_message`
+1. **斜杠命令** `/compact` 当普通 `send_message`；`/plan` `/review` 打开专用页
 2. **重命名会话** `rename_thread`
 3. **只读 Git / 命令面板** `git_status` `run_command`
 4. **局域网直连** 口令登录 + 大文件 REST 上传
@@ -132,11 +132,12 @@ PWA 已冻结在 `pwa-stable` / `master`（`a562688`）。本窗口只在 `feat/
 
 ## Expo Web
 
-开发态正式入口是 `apps/mobile` 的 `npx expo start --web`，看到的是当前 Expo UI，不是 Hub `:18990/` 旧 PWA。不要把 `public/app.js` 抄进 RN。
+开发态正式入口是 `apps/mobile` 的 `npx expo start --web` → `http://localhost:18991`，不是 Hub `:18990` 的 PWA。不要把 `apps/web/app.js` 抄进 RN。
 
 - Web 依赖按 SDK 54 用 `npx expo install react-dom react-native-web @expo/metro-runtime`。
 - 配对页自动 HTTP 探测本机 Hub（见 04-protocol），不要手填默认局域网 IP。
 - Web 隐藏相机扫码；推送 no-op；存储先试 SecureStore，不行就 `localStorage`。
+- Web 认 `#thread-<uuid>`（也认 `?threadId=`）。打开时若带会话 ID：先不渲染任何会话，等 WS `connected` 再 `get_thread_history`；切会话用 `replaceState` 写成 hash。配对 query `?pair=` 不动。
 - 出门地址是 `https://hub.codesk.icu:8787`。Android 必须 `expo-crypto` 给 tweetnacl 补 PRNG，否则握手停在「正在连中继」并报 `no PRNG`。
 - 本窗口不打 EAS 上架，也不把 Expo 静态包挂到 Hub（same-origin 托管另开窗口）。已装的旧 APK 不含上述修复，须重打。
 
@@ -150,8 +151,11 @@ PWA 已冻结在 `pwa-stable` / `master`（`a562688`）。本窗口只在 `feat/
 
 我们做：
 
-- **项目默认真叠。** 只展开「当前打开会话所在项目」；点文件夹才开合。搜索时全部展开并过滤。
-- **置顶。** `thread.isPinned` / `project.isPinned` 单独一节，在项目之上。
+- **窄屏先列表后会话。** 宽度不到 1100 不自动打开第一条；列表是首页，点进会话用返回回到列表。宽屏仍三栏。
+- **连接过程可见。** 中继：连接中继 → 设备鉴权 → 加密握手 → 同步工作区。局域网跳过加密。失败写人话（旧 APK、没 `hk=`、主机离线）。
+- **项目默认真叠。** 只展开「当前打开会话所在项目」；点文件夹才开合。搜索时全部展开并过滤。工作区行可带本机路径。
+- **置顶。** `thread.isPinned` / `project.isPinned` 单独一节，在项目之上。`togglePin` 发 Hub `pin_item`，不要只写本机 `onedesk.pins`。项目文件夹长按同样走 Hub。
+- **归档。** `archiveThread` 发 `archive_item`，不要只写本机 `onedesk.archived`。
 - **最近。** 全量按 `mtimeMs` 取约 20 条，标题 + 相对时间（2分钟），不套在项目里。
 - 顶栏：返回不必；一行主机状态（绿点+在线/离线）。右上 `⋯` → 添加配对 / 设置。
 - 底栏：圆角搜索 + 黑圆新聊天。新聊天先弹出「选择项目」（当前目录 / 最近项目 / 无项目），再 `create_thread`。
@@ -164,7 +168,7 @@ PWA 已冻结在 `pwa-stable` / `master`（`a562688`）。本窗口只在 `feat/
 
 - **用户消息：** 深色胶囊、白字、靠右（浅色主题黑底，深色主题浅灰底）。
 - **助手消息：** 无卡片、通栏、只留 Markdown 正文。下挂复制。
-- **默认藏过程：** reasoning / 子智能体 / 命令卡不进主时间线。改文件卡收成一行「改了 x 个文件 +N -M」，点开再看补丁或预览。审批条保留。
+- **默认藏过程：** 推理块默认折叠成一行「思考」，点开展开。命令卡默认折叠。改文件卡收成一行「改了 x 个文件 +N -M」，点开再看补丁或预览。审批条保留。
 - **可选「显示过程」。** 设置里关开，默认关。
 - **顶栏：** 返回 + 中间标题胶囊（标题 / 项目名 / 主机）+ 状态 + `⋯`（复制 threadId、重命名）。
 - **输入区上方：** 模型、权限两个浅灰芯片（已有数据）。

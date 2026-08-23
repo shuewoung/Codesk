@@ -91,11 +91,33 @@ export function ErrorBanner({ text, onClose }: { text: string; onClose?: () => v
   );
 }
 
+export function PlusCircleOutlineIcon({ size = 15, color }: { size?: number; color?: string }) {
+  const { colors } = useTheme();
+  const c = color || colors.muted;
+  const lineLen = Math.round(size * 0.48);
+  return (
+    <View
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size / 2,
+        borderWidth: 1.3,
+        borderColor: c,
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      <View style={{ width: lineLen, height: 1.3, backgroundColor: c }} />
+      <View style={{ width: 1.3, height: lineLen, backgroundColor: c, position: 'absolute' }} />
+    </View>
+  );
+}
+
 export function FolderOutlineIcon({ size = 15, color, open = false }: { size?: number; color?: string; open?: boolean }) {
   const { colors } = useTheme();
   const c = color || colors.muted;
   return (
-    <View style={{ width: size + 2, height: size, justifyContent: 'flex-end', marginRight: 6 }}>
+    <View style={{ width: size + 2, height: size, justifyContent: 'flex-end' }}>
       <View
         style={{
           width: size * 0.46,

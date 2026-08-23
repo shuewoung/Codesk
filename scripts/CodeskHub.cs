@@ -15,6 +15,7 @@ internal static class CodeskHub
 {
     const int Port = 18990;
     const string AppUrl = "http://127.0.0.1:18990/";
+    const string ExpoUrl = "http://127.0.0.1:18991/";
     const string HostUrl = "http://127.0.0.1:18990/host";
     const string MutexName = "Global\\CodeskHubTray";
 
@@ -173,6 +174,28 @@ internal static class CodeskHub
     static void OpenUrl(string url)
     {
         Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+    }
+
+    static bool UrlUp(string url, int timeoutMs)
+    {
+        try
+        {
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.Timeout = timeoutMs;
+            req.ReadWriteTimeout = timeoutMs;
+            req.Method = "GET";
+            using (var resp = req.GetResponse())
+                return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    static string WorkbenchUrl()
+    {
+        return UrlUp(ExpoUrl, 400) ? ExpoUrl : AppUrl;
     }
 
     static Bitmap LoadBrandBitmap()
@@ -509,7 +532,7 @@ internal static class CodeskHub
             var hostItem = new ToolStripMenuItem("打开主机台");
             hostItem.Click += (s, e) => OpenUrl(HostUrl);
             var workItem = new ToolStripMenuItem("打开工作台");
-            workItem.Click += (s, e) => OpenUrl(AppUrl);
+            workItem.Click += (s, e) => OpenUrl(WorkbenchUrl());
             var exitItem = new ToolStripMenuItem("退出 Hub");
             exitItem.Click += (s, e) => ExitThread();
 

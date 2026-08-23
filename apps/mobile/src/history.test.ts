@@ -22,13 +22,14 @@ test('flattenItems keeps user/assistant text and skips developer/context', () =>
     { type: 'message', role: 'user', content: '<user_instructions>sys</user_instructions>\n你好' },
     { type: 'message', role: 'assistant', content: [{ text: '收到' }] },
     { type: 'message', role: 'assistant', content: '继续' },
-    { type: 'reasoning', content: 'think' },
+    { type: 'reasoning', summary: [{ text: 'think' }] },
   ]);
   assert.deepEqual(
     bubbles.map((b) => [b.kind, b.text]),
     [
       ['user', '你好'],
       ['assistant', '收到\n\n继续'],
+      ['reasoning', 'think'],
     ],
   );
 });
@@ -42,7 +43,7 @@ test('flattenItems folds command, patch and subagent into text', () => {
   assert.equal(bubbles[0].kind, 'command');
   assert.match(bubbles[0].text, /echo hi/);
   assert.equal(bubbles[1].kind, 'diff');
-  assert.equal(bubbles[2].kind, 'system');
+  assert.equal(bubbles[2].kind, 'agent');
   assert.match(bubbles[2].text, /已更新/);
 });
 
@@ -72,6 +73,52 @@ test('mergeHistory applies matching delta and replaces on mismatch', () => {
   });
   assert.equal(replaced.items.length, 1);
   assert.equal((replaced.items[0] as { content?: string }).content, 'full');
+});
+
+test('mergeHistory keeps a longer dump when a short snapshot arrives', () => {
+  const prev = {
+    ...emptyHistory(),
+    items: [
+      { type: 'message', role: 'user', content: 'old' },
+      { type: 'message', role: 'assistant', content: 'mid' },
+      { type: 'message', role: 'user', content: 'new' },
+    ],
+    full: true,
+    rev: 8,
+    hasMore: false,
+    totalItems: 3,
+  };
+  const kept = mergeHistory(prev, {
+    items: [{ type: 'message', role: 'user', content: 'new' }],
+    status: 'working',
+    rev: 9,
+    hasMore: true,
+    totalItems: 3,
+  });
+  assert.equal(kept.items.length, 3);
+  assert.equal(kept.full, true);
+  assert.equal(kept.status, 'working');
+  assert.equal((kept.items[0] as { content?: string }).content, 'old');
+});
+
+test('mergeHistory honors full dumps and does not trim live deltas on them', () => {
+  const items = Array.from({ length: 260 }, (_, i) => ({
+    type: 'message',
+    role: i % 2 ? 'assistant' : 'user',
+    content: String(i),
+  }));
+  const full = mergeHistory(emptyHistory(), { items, full: true, hasMore: false, totalItems: 260, rev: 2 });
+  assert.equal(full.items.length, 260);
+  assert.equal(full.full, true);
+
+  const live = mergeHistory(full, {
+    items: [],
+    rev: 3,
+    full: true,
+    delta: { baseRev: 2, newItems: [{ type: 'message', role: 'assistant', content: 'tail' }] },
+  });
+  assert.equal(live.items.length, 261);
+  assert.equal(live.full, true);
 });
 
 test('parseThreadList dedupes and groups by project when projects missing', () => {

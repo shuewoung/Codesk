@@ -3,6 +3,7 @@ type JPushMod = {
   getRegistrationID: (cb: (res: { registerID?: string }) => void) => void;
   addNotificationListener?: (cb: (res: Record<string, unknown>) => void) => void;
   getLaunchAppNotification?: (cb: (res: Record<string, unknown>) => void) => void;
+  requestPermission?: () => void;
 };
 
 type OpenHandler = (threadId: string) => void;
@@ -94,6 +95,25 @@ function loadJPush(): JPushMod | null {
   }
 }
 
+async function requestNotificationPermission(): Promise<void> {
+  try {
+    const { PermissionsAndroid, Platform } = require('react-native') as {
+      PermissionsAndroid?: {
+        PERMISSIONS: { POST_NOTIFICATIONS?: string };
+        RESULTS: { GRANTED: string };
+        request: (permission: string) => Promise<string>;
+      };
+      Platform?: { OS?: string; Version?: number | string };
+    };
+    if (Platform?.OS !== 'android' || Number(Platform.Version) < 33) return;
+    const permission = PermissionsAndroid?.PERMISSIONS?.POST_NOTIFICATIONS;
+    if (!permission || !PermissionsAndroid?.request) return;
+    await PermissionsAndroid.request(permission);
+  } catch {
+    /* native optional */
+  }
+}
+
 function ensureJpushListeners() {
   if (jpushReady) return;
   const JPush = loadJPush();
@@ -101,6 +121,7 @@ function ensureJpushListeners() {
   jpushReady = true;
   const appKey = readAppKey();
   JPush.init({ appKey, channel: 'developer-default', production: true });
+  try { JPush.requestPermission?.(); } catch { /* android 13+ */ }
   JPush.addNotificationListener?.((res) => {
     const event = String(res?.notificationEventType || res?.eventType || '');
     if (event && event !== 'notificationOpened' && event !== 'notification_opened') return;
@@ -117,7 +138,9 @@ export async function getJpushRegistrationId(): Promise<string> {
   const appKey = readAppKey();
   if (!appKey) return '';
   try {
+    await requestNotificationPermission();
     JPush.init({ appKey, channel: 'developer-default', production: true });
+    try { JPush.requestPermission?.(); } catch { /* android 13+ */ }
     ensureJpushListeners();
     return await new Promise((resolve) => {
       const timer = setTimeout(() => resolve(''), 4000);

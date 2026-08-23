@@ -84,11 +84,16 @@ test('loginLan posts password/code to hub', async () => {
   assert.equal(calls[0].init.body, JSON.stringify({ password: 'ABC123', code: 'ABC123' }));
 });
 
+test('loginLan rejects html success without session token', async () => {
+  mockFetch(() => new Response('<html>login</html>', { status: 200, headers: { 'content-type': 'text/html' } }));
+  await assert.rejects(() => loginLan('https://cds.zhangsw.work', 'ABCD'), /无法连接/);
+});
+
 test('loginLan maps fetch failure to a chinese error', async () => {
   mockFetch(() => {
     throw new TypeError('Network request failed');
   });
-  await assert.rejects(() => loginLan('http://192.168.1.8:18990', 'ABC'), /同一 WiFi/);
+  await assert.rejects(() => loginLan('http://192.168.1.8:18990', 'ABC'), /无法连接/);
 });
 
 test('revokeDevice sends Bearer token and does nothing without creds', async () => {

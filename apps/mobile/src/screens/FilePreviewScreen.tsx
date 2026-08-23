@@ -10,8 +10,8 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import Markdown from 'react-native-markdown-display';
-import { useSession } from '../session';
-import { radius, space } from '../theme';
+import { useWorkspace } from '../session';
+import { space } from '../theme';
 import { useTheme } from '../theme-context';
 
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.svg']);
@@ -92,26 +92,29 @@ export function FilePreviewScreen({
   path: string;
   onBack: () => void;
 }) {
-  const session = useSession();
+  const workspace = useWorkspace();
   const { colors, theme } = useTheme();
   const isDark = theme === 'dark';
-  const file = session.files[path];
+  const file = workspace.files[path];
   const [htmlViewMode, setHtmlViewMode] = useState<'preview' | 'code'>('preview');
   const [copied, setCopied] = useState(false);
 
+  const requestFile = workspace.requestFile;
   useEffect(() => {
-    session.requestFile(threadId, path);
-  }, [threadId, path]);
+    requestFile(threadId, path);
+  }, [threadId, path, requestFile]);
 
   const ext = file?.ext?.toLowerCase() || '';
   const isImage = file && file.encoding === 'base64' && IMAGE_EXTS.has(ext);
   const isMarkdown = file && file.encoding === 'utf8' && ['.md', '.markdown', '.mdx'].includes(ext);
   const isHtml = file && file.encoding === 'utf8' && ['.html', '.htm'].includes(ext);
+  const isOffice = ['.docx', '.xlsx', '.pptx', '.pdf', '.doc', '.xls', '.ppt'].includes(ext);
+  const isCsv = file && file.encoding === 'utf8' && ['.csv', '.tsv'].includes(ext);
 
   const tokenizedLines = useMemo(() => {
     if (!file || !file.content || isImage || isMarkdown) return [];
     return tokenizeCode(file.content, ext);
-  }, [file?.content, ext, isImage, isMarkdown]);
+  }, [file, ext, isImage, isMarkdown]);
 
   const handleCopy = async () => {
     if (!file?.content) return;
@@ -139,6 +142,9 @@ export function FilePreviewScreen({
         <Text style={[styles.title, { color: colors.text }]} numberOfLines={1}>
           {file?.fileName || path}
         </Text>
+        <Pressable onPress={() => { void Clipboard.setStringAsync(file?.path || path); setCopied(true); setTimeout(() => setCopied(false), 1600); }} hitSlop={10} style={styles.copyBtn}>
+          <Text style={{ color: colors.muted, fontSize: 13, fontWeight: '600' }}>路径</Text>
+        </Pressable>
         <Pressable onPress={handleCopy} hitSlop={10} style={styles.copyBtn}>
           <Text style={{ color: copied ? colors.ok : colors.muted, fontSize: 13, fontWeight: '600' }}>
             {copied ? '✓ 已复制' : '复制'}
@@ -179,6 +185,20 @@ export function FilePreviewScreen({
         <View style={styles.centerBox}>
           <Text style={[styles.hint, { color: colors.danger }]}>❌ {file.error}</Text>
         </View>
+      ) : isOffice ? (
+        <View style={styles.centerBox}>
+          <Text style={[styles.hint, { color: colors.text, fontWeight: '700' }]}>Office / PDF 产物</Text>
+          <Text style={[styles.hint, { color: colors.muted, marginTop: 8 }]}>手机里不打开桌面画布。点复制路径，到电脑用 WPS 打开。</Text>
+          <Pressable onPress={() => { void Clipboard.setStringAsync(path); setCopied(true); }} style={{ marginTop: 12 }}>
+            <Text style={{ color: colors.text, fontWeight: '700' }}>{copied ? '已复制路径' : '复制路径'}</Text>
+          </Pressable>
+        </View>
+      ) : isCsv ? (
+        <ScrollView contentContainerStyle={styles.markdownBody}>
+          <Text selectable style={{ color: colors.text, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 12, lineHeight: 18 }}>
+            {file.content}
+          </Text>
+        </ScrollView>
       ) : isImage ? (
         <ScrollView contentContainerStyle={styles.imageBody}>
           <Image
@@ -226,6 +246,18 @@ export function FilePreviewScreen({
           </Markdown>
           {file.truncated ? <Text style={[styles.truncatedNote, { color: colors.warn }]}>⚠️ 内容已截断</Text> : null}
         </ScrollView>
+      ) : isHtml && htmlViewMode === 'preview' ? (
+        Platform.OS === 'web' ? (
+          <iframe
+            srcDoc={file.content}
+            sandbox="allow-scripts allow-same-origin"
+            style={{ flex: 1, width: '100%', borderWidth: 0, backgroundColor: '#fff' }}
+          />
+        ) : (
+          <View style={styles.centerBox}>
+            <Text style={[styles.hint, { color: colors.muted }]}>手机上看源码；电脑浏览器可实时预览 HTML。</Text>
+          </View>
+        )
       ) : (
         /* Code & Text Highlighting Engine with Line Numbers */
         <ScrollView style={styles.codeContainer} contentContainerStyle={styles.codeScrollContent}>

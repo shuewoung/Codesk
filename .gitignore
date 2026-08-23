@@ -8,6 +8,7 @@ server.log
 
 # 发行包
 dist/
+apps/mobile/dist-web/
 
 # Node
 node_modules/
@@ -17,10 +18,13 @@ node_modules/
 *.png
 !apps/web-hub/public/*.png
 !apps/web-hub/public/icons/*.png
+!apps/web/*.png
+!apps/web/icons/*.png
 !apps/mobile/assets/*.png
 !apps/www/public/*.png
 *.html
 !apps/web-hub/public/*.html
+!apps/web/*.html
 !apps/www/public/*.html
 dom_*.html
 debug_*.js
@@ -28,6 +32,9 @@ debug_*.js
 # 运行态 / 本地数据
 codex-web-state/
 vendor/
+!apps/web/vendor/
+!apps/web/vendor/**
+**/.wrangler/
 apps/web-hub/server.log
 apps/web-hub/server.err.log
 apps/web-hub/logs/

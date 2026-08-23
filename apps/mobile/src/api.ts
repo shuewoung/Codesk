@@ -67,16 +67,18 @@ export async function loginLan(hubUrl: string, password: string): Promise<{ toke
     res = await fetch(`${base}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
       body: JSON.stringify({ password: secret, code: secret }),
     });
   } catch {
-    throw new Error('连不上同一 WiFi 上的电脑。确认 Hub 已开，并和手机在同一个网络。');
+    throw new Error('无法连接');
   }
   const json = await readJson(res);
   if (!res.ok) {
     throw new Error((typeof json?.error === 'string' && json.error) || '口令错误');
   }
-  const token = typeof json?.token === 'string' ? json.token : secret;
+  const token = typeof json?.token === 'string' ? json.token : '';
+  if (!token) throw new Error('无法连接');
   return {
     token,
     hubId: typeof json?.hubId === 'string' ? json.hubId : '',

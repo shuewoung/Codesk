@@ -79,6 +79,8 @@ const KEY_TOKEN = 'onedesk.deviceToken';
 const KEY_HUB = 'onedesk.hubId';
 const KEY_THEME = 'onedesk.theme';
 const KEY_DENSITY = 'onedesk.listDensity';
+const KEY_PROCESS = 'onedesk.showProcess';
+const KEY_LIST_SORT = 'onedesk.listSort';
 const KEY_HK = 'onedesk.hubE2ePub';
 const KEY_DEV = 'onedesk.e2eDevice';
 const KEY_CK = 'onedesk.contentKey';
@@ -138,7 +140,7 @@ export async function saveSession(next: Partial<StoredSession>): Promise<void> {
   if (next.hubId !== undefined) {
     writes.push(next.hubId ? kvSet(KEY_HUB, next.hubId) : kvDel(KEY_HUB));
   }
-  const extras: Array<[keyof StoredSession, string]> = [
+  const extras: [keyof StoredSession, string][] = [
     ['hubE2ePub', KEY_HK],
     ['contentKey', KEY_CK],
     ['keyId', KEY_KID],
@@ -203,6 +205,27 @@ export async function loadListDensity(): Promise<ListDensity> {
 
 export async function saveListDensity(name: ListDensity): Promise<void> {
   await kvSet(KEY_DENSITY, name);
+}
+
+export async function loadShowProcess(): Promise<boolean> {
+  const value = await kvGet(KEY_PROCESS);
+  if (value === '0' || value === 'false') return false;
+  return true;
+}
+
+export async function saveShowProcess(on: boolean): Promise<void> {
+  await kvSet(KEY_PROCESS, on ? '1' : '0');
+}
+
+export type ListSort = 'catalog' | 'recent';
+
+export async function loadListSort(): Promise<ListSort> {
+  const value = await kvGet(KEY_LIST_SORT);
+  return value === 'recent' ? 'recent' : 'catalog';
+}
+
+export async function saveListSort(name: ListSort): Promise<void> {
+  await kvSet(KEY_LIST_SORT, name);
 }
 
 const KEY_PINS = 'onedesk.pins';

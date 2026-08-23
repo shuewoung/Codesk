@@ -12,7 +12,7 @@ const CURRENT_VERSION_CODE = 110;
 
 export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan: () => void }) {
   const session = useSession();
-  const { colors, theme, setTheme, listDensity, setListDensity } = useTheme();
+  const { colors, theme, setTheme, listDensity, setListDensity, showProcess, setShowProcess } = useTheme();
   const [relayUrl, setRelayUrl] = useState(session.relayUrl);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -61,6 +61,13 @@ export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan:
       <Text style={{ color: colors.muted, fontSize: 13, lineHeight: 20 }}>
         本机 Codex 的远程控制面。家里直连电脑，出门经中继。家里码和出门码不是同一个。
       </Text>
+      <Text style={[styles.label, { color: colors.muted }]}>本包能力</Text>
+      <Text style={{ color: colors.muted, fontSize: 13, lineHeight: 20 }}>
+        当前 v{CURRENT_VERSION}。出门须含 E2E 的 APK，并扫带 hk= 的出门码。
+        {Platform.OS === 'android' ? ' 极光推送仅正式 APK 有效，Expo Go 收不到。' : ''}
+        {Platform.OS === 'web' ? ' 浏览器没有推送和相机扫码。' : ''}
+        旧包连上中继却一直「握手中」，请到 codesk.icu 装新包后重扫右边码。
+      </Text>
       <Text style={[styles.label, { color: colors.muted }]}>推送</Text>
       <Text style={{ color: colors.muted, fontSize: 13, lineHeight: 20 }}>
         审批和任务完成走极光推送（仅 Android）。Expo Go / Web 收不到。正式 APK 会自动登记，无需在 Hub 里填密钥。
@@ -96,9 +103,25 @@ export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan:
           <Text style={{ color: colors.text }}>宽松</Text>
         </Pressable>
       </View>
+      <Text style={[styles.label, { color: colors.muted }]}>时间线</Text>
+      <View style={styles.row}>
+        <Pressable
+          style={[styles.chip, { borderColor: colors.line, backgroundColor: showProcess ? colors.card : 'transparent' }]}
+          onPress={() => setShowProcess(true)}
+        >
+          <Text style={{ color: colors.text }}>显示过程</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.chip, { borderColor: colors.line, backgroundColor: !showProcess ? colors.card : 'transparent' }]}
+          onPress={() => setShowProcess(false)}
+        >
+          <Text style={{ color: colors.text }}>隐藏过程</Text>
+        </Pressable>
+      </View>
+      <Text style={{ color: colors.muted, fontSize: 12 }}>关掉后不显示思考、命令和子智能体过程，只留对话和改文件。</Text>
       <Text style={[styles.label, { color: colors.muted }]}>访问权限</Text>
       <View style={styles.row}>
-        {(Object.keys(ACCESS_MODES) as Array<keyof typeof ACCESS_MODES>).map((id) => (
+        {(Object.keys(ACCESS_MODES) as (keyof typeof ACCESS_MODES)[]).map((id) => (
           <Pressable
             key={id}
             unstable_pressDelay={0}
@@ -115,6 +138,9 @@ export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan:
           </Pressable>
         ))}
       </View>
+      <Text style={{ color: colors.muted, fontSize: 12 }}>
+        {ACCESS_MODES[(session.config.accessMode === 'ask' || session.config.accessMode === 'auto' || session.config.accessMode === 'full') ? session.config.accessMode : 'full'].hint}
+      </Text>
       <Text style={[styles.label, { color: colors.muted }]}>当前连接</Text>
       <Text style={{ color: colors.text, fontSize: 15 }}>
         {session.conn === 'connected'

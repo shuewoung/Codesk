@@ -7,4 +7,5 @@ module.exports = {
   getLaunchAppNotification(cb) {
     if (typeof cb === 'function') cb({});
   },
+  requestPermission() {},
 };

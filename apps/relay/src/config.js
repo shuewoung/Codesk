@@ -6,9 +6,15 @@ const SRC_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const RELAY_ROOT = path.resolve(SRC_DIR, '..');
 
 function defaultWebRoot() {
-  const sibling = path.resolve(RELAY_ROOT, '..', 'web-hub', 'public');
-  if (fs.existsSync(sibling)) return sibling;
-  return path.join(RELAY_ROOT, 'public');
+  const candidates = [
+    path.resolve(RELAY_ROOT, '..', 'web'),
+    path.resolve(RELAY_ROOT, '..', 'web-hub', 'public'),
+    path.join(RELAY_ROOT, 'public'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'index.html'))) return dir;
+  }
+  return candidates[0];
 }
 
 function num(value, fallback) {

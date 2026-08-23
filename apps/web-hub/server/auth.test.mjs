@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isLoopbackAddress, isTrustedLocalReq } from './auth.js';
+import { isLoopbackAddress, isForwardedRequest, isTrustedLocalReq } from './auth.js';
 
 test('loopback addresses', () => {
   assert.equal(isLoopbackAddress('127.0.0.1'), true);
@@ -18,7 +18,15 @@ test('trusted local allows same-origin loopback and curl', () => {
   }, 18990), true);
   assert.equal(isTrustedLocalReq({
     socket: { remoteAddress: '127.0.0.1' },
-    headers: { origin: 'http://localhost:8081' },
+    headers: { origin: 'http://localhost:18991' },
+  }, 18990), true);
+  assert.equal(isTrustedLocalReq({
+    socket: { remoteAddress: '127.0.0.1' },
+    headers: { origin: 'http://100.66.1.5:18991' },
+  }, 18990), true);
+  assert.equal(isTrustedLocalReq({
+    socket: { remoteAddress: '127.0.0.1' },
+    headers: { origin: 'http://localhost:9999' },
   }, 18990), false);
   assert.equal(isTrustedLocalReq({
     socket: { remoteAddress: '127.0.0.1' },
@@ -27,5 +35,26 @@ test('trusted local allows same-origin loopback and curl', () => {
   assert.equal(isTrustedLocalReq({
     socket: { remoteAddress: '192.168.1.8' },
     headers: {},
+  }, 18990), false);
+});
+
+test('cloudflare tunnel / zero trust forwarded requests are not trusted local', () => {
+  const loop = { socket: { remoteAddress: '127.0.0.1' } };
+  assert.equal(isForwardedRequest({ headers: { 'cf-connecting-ip': '203.0.113.8' } }), true);
+  assert.equal(isTrustedLocalReq({
+    ...loop,
+    headers: { 'cf-connecting-ip': '203.0.113.8' },
+  }, 18990), false);
+  assert.equal(isTrustedLocalReq({
+    ...loop,
+    headers: { 'cf-access-jwt-assertion': 'eyJhbGciOiJSUzI1NiJ9.e30.sig' },
+  }, 18990), false);
+  assert.equal(isTrustedLocalReq({
+    ...loop,
+    headers: { 'x-forwarded-for': '203.0.113.8' },
+  }, 18990), false);
+  assert.equal(isTrustedLocalReq({
+    ...loop,
+    headers: { 'x-forwarded-proto': 'https' },
   }, 18990), false);
 });

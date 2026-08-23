@@ -72,6 +72,10 @@ export function isWriterLockError(err) {
   );
 }
 
+export function isNoActiveTurnError(err) {
+  return /no active turn|没有进行中的 turn/i.test(String(err?.message || err || ''));
+}
+
 export function normalizeInput(input, text) {
   const items = [];
   if (Array.isArray(input)) {
@@ -343,12 +347,14 @@ export class CodexAppServer extends EventEmitter {
 
   _onNotification(msg) {
     const threadId = this._threadIdOf(msg.params);
-    if (threadId) {
-      // turn/started 携带新 turnId，更新映射供 interrupt 使用
-      const turnId = msg.params?.turn?.id || msg.params?.turnId;
-      if (msg.method === 'turn/started' && turnId) this.currentTurnByThread.set(threadId, turnId);
-      this.emit('thread-activity', { threadId, method: msg.method });
+    const method = String(msg.method || '');
+    const turnId = msg.params?.turn?.id || msg.params?.turnId;
+    if (threadId && method === 'turn/started' && turnId) {
+      this.currentTurnByThread.set(threadId, turnId);
+    } else if (threadId && /turn\/(completed|interrupted)|error/i.test(method)) {
+      this.currentTurnByThread.delete(threadId);
     }
+    if (threadId) this.emit('thread-activity', { threadId, method: msg.method });
   }
 
   // —— 读（无锁）——
@@ -399,7 +405,7 @@ export class CodexAppServer extends EventEmitter {
     return r;
   }
 
-  async sendUserTurn({ threadId, text, input = null, cwd = null, model = null, effort = null }) {
+  async sendUserTurn({ threadId, text, input = null, cwd = null, model = null, effort = null, collaborationMode = null }) {
     const r = await this.client.request(
       M.TURN_START,
       {
@@ -416,7 +422,7 @@ export class CodexAppServer extends EventEmitter {
         summary: null,
         personality: null,
         outputSchema: null,
-        collaborationMode: null,
+        collaborationMode: collaborationMode || null,
       },
       { timeoutMs: 120000 }
     );

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createAuth, corsHeaders, isAllowedCorsOrigin, isPublicApi, parseCookies } from '../../apps/web-hub/server/auth.js';
+import { createAuth, corsHeaders, isAllowedCorsOrigin, isForwardedRequest, isPublicApi, isTrustedLocalReq, parseCookies } from '../../apps/web-hub/server/auth.js';
 import { loadOrCreateIdentity } from '../../apps/web-hub/server/identity.js';
 import { runGitReadonly, spawnCommand } from '../../apps/web-hub/server/local-cmd.js';
 import { envelopeHasSecrets, toRelayWsUrl } from '../../apps/web-hub/server/relay-client.js';
@@ -35,12 +35,13 @@ await record('public api allowlist', () => {
 });
 
 await record('cors allows expo web and lan origins', () => {
-  assert.equal(isAllowedCorsOrigin('http://localhost:8081'), true);
-  assert.equal(isAllowedCorsOrigin('http://127.0.0.1:8081'), true);
-  assert.equal(isAllowedCorsOrigin('http://192.168.1.8:8081'), true);
+  assert.equal(isAllowedCorsOrigin('http://localhost:18991'), true);
+  assert.equal(isAllowedCorsOrigin('http://127.0.0.1:18991'), true);
+  assert.equal(isAllowedCorsOrigin('http://192.168.1.8:18991'), true);
+  assert.equal(isAllowedCorsOrigin('http://100.66.1.5:18991'), true);
   assert.equal(isAllowedCorsOrigin('https://example.com'), false);
-  const headers = corsHeaders({ headers: { origin: 'http://localhost:8081' } });
-  assert.equal(headers['Access-Control-Allow-Origin'], 'http://localhost:8081');
+  const headers = corsHeaders({ headers: { origin: 'http://localhost:18991' } });
+  assert.equal(headers['Access-Control-Allow-Origin'], 'http://localhost:18991');
   assert.equal(headers['Access-Control-Allow-Methods'].includes('OPTIONS'), true);
 });
 
@@ -52,6 +53,24 @@ await record('identity persists hubId', () => {
   assert.equal(a.hubSecret, b.hubSecret);
   const raw = fs.readFileSync(path.join(dir, 'identity.json'), 'utf8');
   assert.equal(raw.includes('hubId'), true);
+});
+
+await record('forwarded cloudflare headers are not trusted local', () => {
+  const loop = { socket: { remoteAddress: '127.0.0.1' }, headers: {} };
+  assert.equal(isTrustedLocalReq(loop, 18990), true);
+  assert.equal(isForwardedRequest({ headers: { 'cf-connecting-ip': '1.2.3.4' } }), true);
+  const auth = createAuth({
+    dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'onedesk-auth-fwd-')),
+    env: { ONEDESK_PASSWORD: 'secret' },
+  });
+  assert.equal(auth.authorize({
+    socket: { remoteAddress: '127.0.0.1' },
+    headers: { 'cf-connecting-ip': '203.0.113.9' },
+  }), false);
+  assert.equal(auth.authorize({
+    socket: { remoteAddress: '127.0.0.1' },
+    headers: { 'cf-access-jwt-assertion': 'token', 'x-forwarded-proto': 'https' },
+  }), false);
 });
 
 await record('auth cookie Path=/ and unauthorized without login', () => {

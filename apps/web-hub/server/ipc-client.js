@@ -16,6 +16,12 @@ const VERSIONS = {
   'thread-stream-following-status-requested': 1,
 };
 
+const APPROVAL_METHODS = [
+  'thread-follower-command-approval-decision',
+  'thread-follower-file-approval-decision',
+  'thread-follower-permissions-request-approval-response',
+];
+
 export function approvalMethodFromKind(kind) {
   const raw = String(kind || '').toLowerCase();
   if (raw.includes('file') || raw.includes('patch') || raw.includes('filechange')) {
@@ -25,6 +31,37 @@ export function approvalMethodFromKind(kind) {
     return 'thread-follower-permissions-request-approval-response';
   }
   return 'thread-follower-command-approval-decision';
+}
+
+export function approvalKindFallbacks(kind) {
+  const primary = approvalMethodFromKind(kind);
+  return [primary, ...APPROVAL_METHODS.filter((method) => method !== primary)];
+}
+
+export function approvalRequestIdCandidates({ liveRows = [], requestId, extraIds = [] } = {}) {
+  const live = (liveRows || []).map((row) => row?.id).filter((v) => v != null && v !== '').map(String);
+  const extra = [...(extraIds || []), requestId]
+    .map((v) => (v == null ? '' : String(v)))
+    .filter(Boolean);
+  return [...new Set([...live, ...extra])];
+}
+
+export function overlayPendingWithLive(pending, liveRows) {
+  const rows = Array.isArray(liveRows) ? liveRows : [];
+  if (!rows.length) return pending || null;
+  const first = rows[0] || {};
+  const ids = [...new Set(
+    [first.id, first.itemId, pending?.id, pending?.requestId, ...(pending?.ids || [])]
+      .map((v) => (v == null ? '' : String(v)))
+      .filter(Boolean)
+  )];
+  return {
+    ...(pending && typeof pending === 'object' ? pending : {}),
+    id: String(first.id || pending?.id || ''),
+    ids,
+    type: first.method || pending?.type,
+    command: first.command || pending?.command,
+  };
 }
 
 export function buildApprovalParams({ conversationId, requestId, decision, kind }) {
@@ -185,10 +222,12 @@ export class CodexIpcClient {
     });
   }
 
+  forgetOwner(conversationId) {
+    this.owners.delete(conversationId);
+  }
+
   async findOwner(conversationId, hostId = 'local') {
     await this.ensureConnected();
-    const cached = this.owners.get(conversationId);
-    if (cached) return cached;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const discovery = await this.request(
         'thread-owner-discovery',
@@ -199,14 +238,16 @@ export class CodexIpcClient {
         this.owners.set(conversationId, discovery.handledByClientId);
         return discovery.handledByClientId;
       }
+      this.owners.delete(conversationId);
       console.log(`[ipc] discovery ${conversationId}: ${discovery?.error || 'no owner'}`);
       if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 400));
     }
-    return this.owners.get(conversationId) || null;
+    return null;
   }
 
-  async startTurn(conversationId, input, ownerId) {
+  async startTurn(conversationId, input, ownerId, extra = {}) {
     await this.ensureConnected();
+    const collaborationMode = extra?.collaborationMode || extra?.mode || null;
     const response = await this.request(
       'thread-follower-start-turn',
       {
@@ -216,6 +257,7 @@ export class CodexIpcClient {
           clientUserMessageId: crypto.randomUUID(),
           input,
           additionalContext: null,
+          ...(collaborationMode ? { collaborationMode } : {}),
         },
         localTurnMetadata: null,
         mcpAppModelContextAttachments: [],
@@ -308,18 +350,19 @@ export class CodexIpcClient {
     return true;
   }
 
-  async follow(conversationId) {
+  async follow(conversationId, { force = false } = {}) {
     await this.ensureConnected();
     if (!conversationId) return [];
-    if (this.followed.has(conversationId) && this.pendingByThread.has(conversationId)) {
+    if (!force && this.followed.has(conversationId) && this.pendingByThread.has(conversationId)) {
       return this.pendingByThread.get(conversationId) || [];
     }
     this.followed.add(conversationId);
+    if (force) this.pendingByThread.delete(conversationId);
     const pending = new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (this.followWaiters.get(conversationId) === resolve) this.followWaiters.delete(conversationId);
         resolve(this.pendingByThread.get(conversationId) || []);
-      }, 1500);
+      }, force ? 2200 : 1500);
       this.followWaiters.set(conversationId, (rows) => {
         clearTimeout(timer);
         resolve(rows);
@@ -340,23 +383,31 @@ export class CodexIpcClient {
       .map((v) => String(v));
   }
 
-  async sendApprovalDecision({ conversationId, requestId, decision, kind, ownerId }) {
+  async sendApprovalDecision({ conversationId, requestId, decision, kind, ownerId, extraIds = [] }) {
     await this.ensureConnected();
-    const live = await this.follow(conversationId);
-    const liveIds = live.map((row) => row.id).filter((v) => v != null && v !== '');
-    const candidates = [...liveIds, requestId].map((v) => String(v)).filter(Boolean);
+    const live = await this.follow(conversationId, { force: true });
+    const inferredKind = kind || live[0]?.method || '';
+    const ids = approvalRequestIdCandidates({ liveRows: live, requestId, extraIds });
+    const methods = approvalKindFallbacks(inferredKind);
     let lastErr = null;
-    for (const id of [...new Set(candidates)]) {
-      const { method, params } = buildApprovalParams({ conversationId, requestId: id, decision, kind });
-      try {
-        const response = await this.request(method, params, { targetClientId: ownerId });
-        if (response?.resultType === 'error') {
-          lastErr = new Error(response.error || `${method} failed`);
-          continue;
+    for (const id of ids) {
+      for (const methodHint of methods) {
+        const { method, params } = buildApprovalParams({
+          conversationId,
+          requestId: id,
+          decision,
+          kind: methodHint,
+        });
+        try {
+          const response = await this.request(method, params, { targetClientId: ownerId, timeoutMs: 2500 });
+          if (response?.resultType === 'error') {
+            lastErr = new Error(response.error || `${method} failed`);
+            continue;
+          }
+          return { ...(response.result || {}), requestId: id, method };
+        } catch (err) {
+          lastErr = err;
         }
-        return response.result;
-      } catch (err) {
-        lastErr = err;
       }
     }
     throw lastErr || new Error('follower approval failed');

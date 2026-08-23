@@ -12,7 +12,7 @@
 - 设备配对：兑换一次性码 → `deviceToken`
 - 转发：校验 token 后把 `enc`（或不透明 `payload`）送到该 `hubId`。禁止解密、禁止当 JSON 打开业务字段
 - 心跳；Hub 掉线则告诉手机 `hub_offline`
-- 托管与 Hub 相同的 Web 静态文件
+- 托管与 Hub 相同的 Web 静态文件（默认 `apps/web/`，可用 `RELAY_WEB_ROOT` 覆盖）
 - 审计：谁在何时连了哪个 `hubId`（不记消息正文）
 - 极光代发：Hub `push_register` / `push_send`。Master Secret 只放中继环境变量，不进 APK、不进用户 Hub
 

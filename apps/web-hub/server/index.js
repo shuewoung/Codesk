@@ -9,29 +9,86 @@ import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 import { WebSocketServer } from 'ws';
 import webpush from 'web-push';
-import { CodexAppServer, isWriterLockError, normalizeDecision, normalizeInput } from './appserver.js';
-import { getIpcClient } from './ipc-client.js';
-import { createAuth, corsHeaders, isLoopbackAddress, isPublicApi } from './auth.js';
+import { CodexAppServer, isNoActiveTurnError, isWriterLockError, normalizeDecision, normalizeInput } from './appserver.js';
+import { getIpcClient, overlayPendingWithLive } from './ipc-client.js';
+import { createAuth, corsHeaders, isLoopbackAddress, isPublicApi, isForwardedRequest } from './auth.js';
 import { defaultDataDir, loadOrCreateIdentity, loadRelayConfig } from './identity.js';
 import { createRelayClient, pairLandingUrl } from './relay-client.js';
 import { spawnCommand, runGitReadonly } from './local-cmd.js';
+import { createPluginStore } from './plugins.js';
+import { listArtifactFiles, searchWorkspaceFiles } from './workspace-files.js';
+import { isQuotaError, isQuotaExhausted, quotaExhaustedMessage } from './quota-msg.js';
 import { createGoalsStore } from './goals.js';
 import { APPROVAL_TTL_MS, commandFromFunctionCall, inspectRolloutTail, isNonUserThreadRecord, parseThreadSpawn, resolveLiveStatus, snapshotParseState, threadLooksLive } from './turn-status.js';
+import {
+  applyPinsToGlobalState,
+  archiveRecordToLine,
+  atomicWriteFile,
+  collectDesiredArchivedIds,
+  collectDesiredPinIds,
+  detectJsonIndent,
+  loadArchiveMapFromFile,
+  loadPinMapFromFile,
+  normalizePinKind,
+  parsePinnedOrderKey,
+  pinKey,
+  pinRecordToLine,
+  pinSetsEqual,
+  reconcileDesktopArchiveChange,
+  reconcileDesktopPinChange,
+  resolveIsArchived,
+  resolveIsPinned,
+  resolveProjectIsPinned,
+} from './pins.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 
 const PORT = Number(process.env.PORT) || 18990;
+const EXPO_WEB_PORT = Number(process.env.CODESK_EXPO_WEB_PORT) || 18991;
+const EXPO_WEB_ORIGIN = `http://127.0.0.1:${EXPO_WEB_PORT}`;
+let expoWebProbe = { at: 0, up: false };
+
+function expoWebDevUp(cb) {
+  const now = Date.now();
+  if (now - expoWebProbe.at < 2000) {
+    cb(expoWebProbe.up);
+    return;
+  }
+  const req = http.get({
+    host: '127.0.0.1',
+    port: EXPO_WEB_PORT,
+    path: '/',
+    timeout: 250,
+  }, (r) => {
+    r.resume();
+    expoWebProbe = { at: Date.now(), up: true };
+    cb(true);
+  });
+  req.on('error', () => {
+    expoWebProbe = { at: Date.now(), up: false };
+    cb(false);
+  });
+  req.on('timeout', () => {
+    req.destroy();
+    expoWebProbe = { at: Date.now(), up: false };
+    cb(false);
+  });
+}
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 const goals = createGoalsStore(CODEX_HOME);
+const plugins = createPluginStore(CODEX_HOME);
 function resolvePublicDir() {
   const candidates = [
-    // 单一维护目录（浏览器/PWA 多端一致版）
-    path.join(__dirname, '..', '..', 'web'),
+    // Expo Web 导出（电脑浏览器与 APK 同一套 UI）
+    path.join(__dirname, '..', '..', 'mobile', 'dist-web'),
     path.join(__dirname, '..', 'public'),
     path.join(path.dirname(process.execPath), 'public'),
     path.join(process.cwd(), 'public'),
+    path.join(process.cwd(), 'apps', 'mobile', 'dist-web'),
+    // 旧 PWA，导出未生成时回退
+    path.join(__dirname, '..', '..', 'web'),
     path.join(process.cwd(), 'apps', 'web'),
   ];
   for (const dir of candidates) {
@@ -42,6 +99,16 @@ function resolvePublicDir() {
 const PUBLIC_DIR = resolvePublicDir();
 const UPLOAD_DIR = path.join(CODEX_HOME, 'hub-uploads');
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+const FILE_RAW_LIMIT = MAX_UPLOAD_BYTES;
+const RAW_IMAGE_MIME = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
+};
 const CONFIG_TOML_PATH = path.join(CODEX_HOME, 'config.toml');
 const AUTH_JSON_PATH = path.join(CODEX_HOME, 'auth.json');
 const HISTORY_LIMIT = 250; // 服务端保留的尾部消息窗口大小
@@ -117,6 +184,8 @@ function readCodexConfig() {
     rawModel: 'gpt-5.6-sol',
     effort: 'xhigh',
     rawEffort: 'xhigh',
+    speed: 'default',
+    rawSpeed: 'default',
     sandboxMode: '完全访问',
     rawSandboxMode: 'danger-full-access',
     accessMode: 'full',
@@ -132,6 +201,8 @@ function readCodexConfig() {
     let rawModel = defaultConfig.rawModel;
     let effort = defaultConfig.effort;
     let rawEffort = defaultConfig.rawEffort;
+    let speed = defaultConfig.speed;
+    let rawSpeed = defaultConfig.rawSpeed;
     let sandboxMode = defaultConfig.sandboxMode;
     let rawSandboxMode = defaultConfig.rawSandboxMode;
     let approvalPolicy = defaultConfig.approvalPolicy;
@@ -149,6 +220,12 @@ function readCodexConfig() {
         if (match) {
           rawEffort = normalizeEffortId(match[1]);
           effort = rawEffort;
+        }
+      } else if (trimmed.startsWith('service_tier =')) {
+        const match = trimmed.match(/service_tier\s*=\s*"([^"]+)"/);
+        if (match) {
+          rawSpeed = normalizeSpeedId(match[1]);
+          speed = rawSpeed;
         }
       } else if (trimmed.startsWith('sandbox_mode =')) {
         const match = trimmed.match(/sandbox_mode\s*=\s*"([^"]+)"/);
@@ -171,11 +248,28 @@ function readCodexConfig() {
       sandboxMode = '请求批准';
     }
 
-    return { model, rawModel, effort, rawEffort, sandboxMode, rawSandboxMode, accessMode, approvalPolicy };
+    return { model, rawModel, effort, rawEffort, speed, rawSpeed, sandboxMode, rawSandboxMode, accessMode, approvalPolicy };
   } catch (e) {
     console.error('Error reading config.toml:', e);
     return defaultConfig;
   }
+}
+
+function normalizeSpeedId(value) {
+  const raw = String(value || '').trim();
+  const key = raw.toLowerCase();
+  const map = {
+    default: 'default',
+    standard: 'default',
+    标准: 'default',
+    fast: 'fast',
+    快速: 'fast',
+    flex: 'flex',
+    弹性: 'flex',
+    priority: 'priority',
+    优先: 'priority',
+  };
+  return map[key] || map[raw] || (raw ? key : 'default');
 }
 
 function normalizeEffortId(value) {
@@ -204,10 +298,8 @@ function normalizeEffortId(value) {
 }
 
 function updateCodexConfig(key, value) {
-  if (!fs.existsSync(CONFIG_TOML_PATH)) return;
-
   try {
-    let content = fs.readFileSync(CONFIG_TOML_PATH, 'utf-8');
+    let content = fs.existsSync(CONFIG_TOML_PATH) ? fs.readFileSync(CONFIG_TOML_PATH, 'utf-8') : '';
 
     if (key === 'model') {
       const rawModel = String(value || '').trim();
@@ -221,6 +313,14 @@ function updateCodexConfig(key, value) {
         content = content.replace(/model_reasoning_effort\s*=\s*"[^"]+"/, `model_reasoning_effort = "${rawEffort}"`);
       } else {
         content = `model_reasoning_effort = "${rawEffort}"\n${content}`;
+      }
+    } else if (key === 'speed') {
+      const rawSpeed = normalizeSpeedId(value);
+      if (!rawSpeed) return;
+      if (/^service_tier\s*=/m.test(content)) {
+        content = content.replace(/service_tier\s*=\s*"[^"]+"/, `service_tier = "${rawSpeed}"`);
+      } else {
+        content = `service_tier = "${rawSpeed}"\n${content}`;
       }
     } else if (key === 'permission') {
       const profiles = {
@@ -262,8 +362,11 @@ let lastRolloutIndexBuildAt = 0;
 // ----------------------------------------------------
 let threadMetaCache = new Map(); // threadId -> { title, cwd, isPinned, isArchived, updatedAtMs }
 const titleOverrideMap = new Map(); // threadId -> { name, upd } 手动重命名优先于旧索引
+const pinOverrideMap = new Map(); // key: `${kind}:${id}` -> { pinned: boolean, upd: string, kind: 'thread'|'project' }
+const archiveOverrideMap = new Map(); // threadId -> { archived: boolean, upd: string }
 let subagentThreadIds = new Set(); // threadId -> true（子智能体会话，app 列表不显示）
 let subagentParentById = new Map(); // childThreadId -> parentThreadId
+let subagentMetaById = new Map(); // childThreadId -> { title, parentId, cwd }
 let lastThreadMetaStat = { mtimeMs: 0, size: 0, walMtimeMs: 0, walSize: 0 };
 let threadMetaLastCheck = 0;
 
@@ -281,12 +384,12 @@ function cleanTitle(raw, maxLen = 50) {
 
 function loadThreadMetaCache(force = false) {
   const now = Date.now();
-  if (!force && now - threadMetaLastCheck < 3000) return;
+  if (!force && now - threadMetaLastCheck < 3000) return false;
   threadMetaLastCheck = now;
 
   const dbPath = path.join(CODEX_HOME, 'state_5.sqlite');
   const walPath = dbPath + '-wal';
-  if (!fs.existsSync(dbPath)) return;
+  if (!fs.existsSync(dbPath)) return false;
 
   let mtimeMs = 0, size = 0, walMtimeMs = 0, walSize = 0;
   try {
@@ -296,17 +399,18 @@ function loadThreadMetaCache(force = false) {
       const w = fs.statSync(walPath);
       walMtimeMs = w.mtimeMs; walSize = w.size;
     }
-  } catch (e) { return; }
+  } catch (e) { return false; }
 
   const sigChanged = mtimeMs !== lastThreadMetaStat.mtimeMs
     || size !== lastThreadMetaStat.size
     || walMtimeMs !== lastThreadMetaStat.walMtimeMs
     || walSize !== lastThreadMetaStat.walSize;
 
-  if (!force && !sigChanged) return;
+  if (!force && !sigChanged) return false;
   lastThreadMetaStat = { mtimeMs, size, walMtimeMs, walSize };
 
   let tmpDir = null;
+  let rebuilt = false;
   try {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-db-'));
     // 复制 db + wal（sqlite 打开副本时会自动重建 -shm）
@@ -325,6 +429,7 @@ function loadThreadMetaCache(force = false) {
       const next = new Map();
       const subagents = new Set();
       const parents = new Map();
+      const metas = new Map();
       for (const r of rows) {
         if (!r.id) continue;
         // 非 app 主会话一律不显示：
@@ -335,6 +440,11 @@ function loadThreadMetaCache(force = false) {
           next.delete(r.id);
           const spawn = parseThreadSpawn(r.source);
           if (spawn && spawn.parentThreadId) parents.set(r.id, spawn.parentThreadId);
+          metas.set(r.id, {
+            title: cleanTitle(r.title) || String(r.id).slice(0, 8),
+            parentId: spawn && spawn.parentThreadId ? spawn.parentThreadId : '',
+            cwd: r.cwd || '',
+          });
           continue;
         }
         // 同一 thread 可能多行（fork/更新），保留 updated_at_ms 最新的一条
@@ -353,6 +463,8 @@ function loadThreadMetaCache(force = false) {
       threadMetaCache = next;
       subagentThreadIds = subagents;
       subagentParentById = parents;
+      subagentMetaById = metas;
+      rebuilt = true;
     } finally {
       try { db.close(); } catch (e) {}
     }
@@ -362,6 +474,7 @@ function loadThreadMetaCache(force = false) {
   } finally {
     if (tmpDir) { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) {} }
   }
+  return rebuilt;
 }
 
 // 从 rollout 文件头提取 cwd 与首条用户消息（作标题 fallback）
@@ -537,6 +650,188 @@ function getActiveLockThreadIds() {
   }
 }
 
+function threadLockHolder(threadId) {
+  if (!threadId) return null;
+  if (codex?.ownedThreads?.has(threadId)) return 'hub';
+  try {
+    const ipc = getIpcClient();
+    if (ipc.owners?.get(threadId)) return 'desktop';
+  } catch { /* pipe optional */ }
+  if (getActiveLockThreadIds().has(threadId)) return 'desktop';
+  return null;
+}
+
+function listSubagentsForParent(parentId) {
+  if (!parentId || !subagentMetaById) return [];
+  const out = [];
+  for (const [id, meta] of subagentMetaById) {
+    if (!meta || meta.parentId !== parentId) continue;
+    out.push({
+      id,
+      title: meta.title || id.slice(0, 8),
+      cwd: meta.cwd || '',
+      status: threadLockHolder(id) || (checkThreadIsActivelyWorking(id) ? 'working' : 'idle'),
+    });
+  }
+  return out;
+}
+
+const STALE_WRITER_LOCK_MS = 120000;
+
+function writerLockPath(threadId) {
+  return path.join(CODEX_HOME, 'thread-writer-locks', `${threadId}.lock`);
+}
+
+function writerLockAgeMs(threadId) {
+  try {
+    const lockPath = writerLockPath(threadId);
+    if (!fs.existsSync(lockPath)) return null;
+    return Date.now() - fs.statSync(lockPath).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+function clearStaleWriterLock(threadId) {
+  const age = writerLockAgeMs(threadId);
+  if (age == null) return false;
+  if (age < STALE_WRITER_LOCK_MS) {
+    console.warn(`[writer-lock] skip clear ${threadId}: lock age ${age}ms < ${STALE_WRITER_LOCK_MS}ms`);
+    return false;
+  }
+  try {
+    fs.unlinkSync(writerLockPath(threadId));
+    console.warn(`[writer-lock] cleared stale lock ${threadId} (age ${age}ms)`);
+    return true;
+  } catch (e) {
+    console.warn(`[writer-lock] clear failed ${threadId}: ${e.message}`);
+    return false;
+  }
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function threadIsLive(threadId) {
+  if (!threadId) return false;
+  const cached = rolloutCache.get(threadId);
+  if (cached) return checkThreadIsActivelyWorking(threadId, cached);
+  const filePath = findRolloutFilePathFast(threadId);
+  return checkThreadIsActivelyWorking(threadId, filePath ? { path: filePath } : null);
+}
+
+async function discoverThreadOwner(ipc, threadId) {
+  try {
+    return await ipc.findOwner(threadId);
+  } catch (error) {
+    console.warn(`[ipc] findOwner failed: ${error.message}`);
+    return null;
+  }
+}
+
+function isNoClientFound(err) {
+  return /no[\s-]*client[\s-]*found/i.test(String(err?.message || ''));
+}
+
+function isActiveTurnError(err) {
+  if (isNoActiveTurnError(err)) return false;
+  return /active turn|turn already|already (?:has )?an? active|in progress|cannot start/i.test(
+    String(err?.message || '')
+  );
+}
+
+async function waitForOwnerOrIdle(ipc, threadId, { timeoutMs = 90000, intervalMs = 500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const ownerId = await discoverThreadOwner(ipc, threadId);
+    if (ownerId) return { ownerId, live: true };
+    if (!threadIsLive(threadId)) return { ownerId: null, live: false };
+    await sleepMs(intervalMs);
+  }
+  return {
+    ownerId: await discoverThreadOwner(ipc, threadId),
+    live: threadIsLive(threadId),
+  };
+}
+
+async function sendViaFollower(ipc, threadId, input, isSteer, ownerId, extra = {}) {
+  if (isSteer) {
+    try {
+      await ipc.steerTurn(threadId, input, ownerId);
+      return 'steer';
+    } catch (err) {
+      if (!isNoActiveTurnError(err) || isNoClientFound(err)) throw err;
+      console.warn(`[ipc] no active turn, start-turn instead: ${threadId}`);
+      await ipc.startTurn(threadId, input, ownerId, extra);
+      return 'send';
+    }
+  }
+  try {
+    await ipc.startTurn(threadId, input, ownerId, extra);
+    return 'send';
+  } catch (err) {
+    if (!isActiveTurnError(err) || isNoClientFound(err)) throw err;
+    console.warn(`[ipc] start-turn busy, steer instead: ${threadId}`);
+    await ipc.steerTurn(threadId, input, ownerId);
+    return 'steer';
+  }
+}
+
+async function tryFollowerSend(ipc, threadId, input, isSteer, ownerId, extra = {}) {
+  try {
+    const action = await sendViaFollower(ipc, threadId, input, isSteer, ownerId, extra);
+    return { ok: true, action };
+  } catch (err) {
+    ipc.forgetOwner(threadId);
+    if (!isNoClientFound(err)) throw err;
+    console.warn(`[ipc] no-client-found, drop owner ${ownerId} for ${threadId}`);
+    return { ok: false, action: isSteer ? 'steer' : 'send' };
+  }
+}
+
+async function sendLocalUserOrSteer(client, threadId, text, input, isSteer, extra = {}) {
+  const liveTurn = client.currentTurnByThread.get(threadId) || null;
+  if (liveTurn) {
+    try {
+      await client.steerTurn({
+        threadId,
+        text,
+        input,
+        expectedTurnId: liveTurn,
+      });
+      return 'steer';
+    } catch (err) {
+      if (!isNoActiveTurnError(err)) throw err;
+      client.currentTurnByThread.delete(threadId);
+      console.warn(`[Remote Action] no active turn, start new: ${threadId}`);
+    }
+  } else if (isSteer) {
+    console.warn(`[Remote Action] steer requested without live turn, start new: ${threadId}`);
+  }
+  await client.sendUserTurn({
+    threadId,
+    text,
+    input,
+    collaborationMode: extra.collaborationMode || extra.mode || null,
+  });
+  return 'send';
+}
+
+async function resumeLocalWriter(client, threadId) {
+  try {
+    await client.resumeThread(threadId);
+    return;
+  } catch (e) {
+    if (!isWriterLockError(e)) throw e;
+    if (threadIsLive(threadId)) throw e;
+    const ownerId = await discoverThreadOwner(getIpcClient(), threadId);
+    if (ownerId) throw e;
+    if (!clearStaleWriterLock(threadId)) throw e;
+    await client.resumeThread(threadId);
+  }
+}
+
 function rolloutLooksLive(rolloutInfo) {
   if (!rolloutInfo || !rolloutInfo.path || !fs.existsSync(rolloutInfo.path)) return false;
   try {
@@ -560,6 +855,8 @@ function checkThreadIsActivelyWorking(threadId, rolloutInfo) {
 }
 
 const DESKTOP_STATE_PATH = path.join(CODEX_HOME, '.codex-global-state.json');
+const PINS_PATH = path.join(CODEX_HOME, 'pins.jsonl');
+const ARCHIVES_PATH = path.join(CODEX_HOME, 'archives.jsonl');
 let desktopProjectCatalog = {
   orderNames: [],
   roots: [],
@@ -578,14 +875,8 @@ function parsePinnedOrder(raw) {
   if (!Array.isArray(raw)) return [];
   const out = [];
   for (const key of raw) {
-    const s = String(key || '');
-    let m = s.match(/^codex:thread:(?:local:)?(.+)$/);
-    if (m) {
-      out.push({ type: 'thread', id: m[1] });
-      continue;
-    }
-    m = s.match(/^codex:project:(.+)$/);
-    if (m) out.push({ type: 'project', id: m[1] });
+    const parsed = parsePinnedOrderKey(key);
+    if (parsed) out.push(parsed);
   }
   return out;
 }
@@ -753,6 +1044,10 @@ function getThreadList() {
     return String(cwd).replace(/^\\\\\?\\/, '').replace(/^\\\?\\/, '');
   }
 
+  // Pins / archives sidecar：远程权威来源，优先于 global-state / sqlite，安全时物化回
+  const pinMap = loadPinMapFromFile(PINS_PATH);
+  const archiveMap = loadArchiveMapFromFile(ARCHIVES_PATH);
+
   const pinnedThreadSet = new Set(catalog.pinnedThreadIds || []);
   const rawThreads = [];
   for (const [threadId, info] of rolloutCache) {
@@ -760,7 +1055,12 @@ function getThreadList() {
     // 过滤子智能体会话（app 左侧列表不显示）
     if (subagentThreadIds.has(threadId)) continue;
     const meta = threadMetaCache.get(threadId);
-    if (meta && meta.isArchived) continue;
+    const archived = resolveIsArchived(threadId, {
+      overrideMap: archiveOverrideMap,
+      archiveMap,
+      fallback: !!(meta && meta.isArchived),
+    });
+    if (archived) continue;
     let mtimeMs = info.mtimeMs;
     try {
       mtimeMs = fs.statSync(info.path).mtimeMs;
@@ -789,6 +1089,13 @@ function getThreadList() {
 
     const project = resolveProject(cwd, catalog);
 
+    // isPinned 优先级：pinOverrideMap / pins.jsonl sidecar → global-state / sqlite meta
+    const isPinned = resolveIsPinned('thread', threadId, {
+      overrideMap: pinOverrideMap,
+      pinMap,
+      fallback: pinnedThreadSet.has(threadId) || !!(meta && meta.isPinned),
+    });
+
     rawThreads.push({
       id: threadId,
       title,
@@ -798,7 +1105,8 @@ function getThreadList() {
       working: isActiveWorking,
       status: needsApproval ? 'waiting_approval' : (isActiveWorking ? 'working' : 'idle'),
       needsApproval,
-      isPinned: pinnedThreadSet.has(threadId) || !!(meta && meta.isPinned),
+      lockHolder: threadLockHolder(threadId),
+      isPinned,
       cwd,
       projectId: project.id || '',
       projectName: project.name
@@ -820,14 +1128,13 @@ function getThreadList() {
         id: t.projectId || '',
         name: key,
         cwd: t.cwd,
-        isPinned: !!(t.projectId && pinnedProjectSet.has(t.projectId)),
+        isPinned: false,
         maxMtimeMs: t.mtimeMs,
         threads: []
       });
     }
     const proj = projectMap.get(key);
     if (!proj.id && t.projectId) proj.id = t.projectId;
-    if (t.projectId && pinnedProjectSet.has(t.projectId)) proj.isPinned = true;
     proj.threads.push(t);
     if (t.mtimeMs > proj.maxMtimeMs) {
       proj.maxMtimeMs = t.mtimeMs;
@@ -843,7 +1150,6 @@ function getThreadList() {
     const primaryRoot = roots[0] && roots[0].root ? roots[0].root : '';
     if (existing) {
       existing.id = existing.id || projectId;
-      existing.isPinned = true;
       if (!existing.cwd && primaryRoot) existing.cwd = primaryRoot;
       continue;
     }
@@ -851,9 +1157,17 @@ function getThreadList() {
       id: projectId,
       name: info.name,
       cwd: primaryRoot,
-      isPinned: true,
+      isPinned: false,
       maxMtimeMs: 0,
       threads: []
+    });
+  }
+
+  for (const proj of projectMap.values()) {
+    proj.isPinned = resolveProjectIsPinned(proj, {
+      overrideMap: pinOverrideMap,
+      pinMap,
+      catalogPinnedIds: pinnedProjectSet,
     });
   }
 
@@ -1071,6 +1385,12 @@ function desktopPendingForThread(threadId) {
   }
 }
 
+function overlayLiveApproval(threadId, pending) {
+  const live = desktopPendingForThread(threadId);
+  if (!live || !live.length) return pending || null;
+  return overlayPendingWithLive(pending, live);
+}
+
 function liveApprovalState(threadId) {
   if (!threadId) return { live: null };
   const hubLive = liveApprovalForThread(threadId);
@@ -1242,7 +1562,7 @@ function mergeAccountQuota(tokenUsage) {
   return usage;
 }
 
-function packHistoryResult(state, delta, limit = HISTORY_LIMIT) {
+function packHistoryResult(state, delta, limit = HISTORY_LIMIT, threadId = '') {
   const items = state.items.length > limit ? state.items.slice(-limit) : state.items;
   return {
     items,
@@ -1251,7 +1571,9 @@ function packHistoryResult(state, delta, limit = HISTORY_LIMIT) {
     status: state.status,
     startedAt: state.startedAt,
     completedAt: state.completedAt,
-    pendingApproval: state.pendingApproval,
+    pendingApproval: overlayLiveApproval(threadId, state.pendingApproval),
+    lockHolder: threadLockHolder(threadId),
+    subagents: listSubagentsForParent(threadId),
     cwd: state.cwd,
     tokenUsage: mergeAccountQuota(state.tokenUsage),
     activeActionText: state.activeActionText,
@@ -1289,7 +1611,7 @@ function parseRolloutHistory(filePath, activeLocks, threadId, pageOptions = {}) 
       const fresh = fullParseIntoState(filePath, stats, FULL_HISTORY_LIMIT);
       const view = snapshotParseState(fresh);
       applyLockOverride(view, activeLocks, threadId, stats, filePath);
-      return packHistoryResult(view, null, FULL_HISTORY_LIMIT);
+      return packHistoryResult(view, null, FULL_HISTORY_LIMIT, threadId);
     }
 
     let state = rolloutParseState.get(threadId);
@@ -1297,7 +1619,7 @@ function parseRolloutHistory(filePath, activeLocks, threadId, pageOptions = {}) 
     if (state && stats.size === state.offset && stats.mtimeMs === state.mtimeMs) {
       const view = snapshotParseState(state);
       applyLockOverride(view, activeLocks, threadId, stats, filePath);
-      return packHistoryResult(view, null);
+      return packHistoryResult(view, null, HISTORY_LIMIT, threadId);
     }
 
     const incremental = state && stats.size > state.offset;
@@ -1309,7 +1631,7 @@ function parseRolloutHistory(filePath, activeLocks, threadId, pageOptions = {}) 
       rolloutParseState.set(threadId, state);
       const view = snapshotParseState(state);
       applyLockOverride(view, activeLocks, threadId, stats, filePath);
-      return packHistoryResult(view, null);
+      return packHistoryResult(view, null, HISTORY_LIMIT, threadId);
     }
 
     // 增量路径：只读取 [offset, size) 的新增字节
@@ -1342,7 +1664,9 @@ function parseRolloutHistory(filePath, activeLocks, threadId, pageOptions = {}) 
     applyLockOverride(view, activeLocks, threadId, stats, filePath);
     return packHistoryResult(
       state,
-      newItems.length > 0 ? { baseRev, newItems: newItems.slice(-HISTORY_LIMIT) } : null
+      newItems.length > 0 ? { baseRev, newItems: newItems.slice(-HISTORY_LIMIT) } : null,
+      HISTORY_LIMIT,
+      threadId
     );
   } catch (e) {
     console.error('Error reading rollout file:', e);
@@ -1399,28 +1723,39 @@ function resolveRequestedFile(rawPath, cwd) {
   return base ? findFileByName(cwd, base) : null;
 }
 
-async function buildWorkspaceDirectoryTreeAsync(targetDir, depth = 0, maxDepth = 2, state = { count: 0 }) {
-  if (!targetDir || depth > maxDepth || state.count > 300) return [];
+const TREE_IGNORE = new Set(['.git', 'node_modules', '.codex', 'tmp', '.venv', '__pycache__', 'dist', 'build', '.idea', '.vscode', 'vendor', 'coverage']);
+
+async function dirHasVisibleChildren(fullPath) {
+  try {
+    const dirents = await fs.promises.readdir(fullPath, { withFileTypes: true });
+    return dirents.some((d) => !TREE_IGNORE.has(d.name) && !d.name.startsWith('.'));
+  } catch {
+    return false;
+  }
+}
+
+async function buildWorkspaceDirectoryTreeAsync(targetDir, depth = 0, maxDepth = 0, state = { count: 0 }) {
+  if (!targetDir || depth > maxDepth || state.count > 400) return [];
   if (!fs.existsSync(targetDir)) return [];
 
-  const ignoreList = new Set(['.git', 'node_modules', '.codex', 'tmp', '.venv', '__pycache__', 'dist', 'build', '.idea', '.vscode', 'vendor', 'coverage']);
   const items = [];
 
   try {
-    // withFileTypes 直接返回类型，免去对每个条目单独 stat
     const dirents = await fs.promises.readdir(targetDir, { withFileTypes: true });
     for (const d of dirents) {
-      if (state.count > 300) break;
-      if (ignoreList.has(d.name) || d.name.startsWith('.')) continue;
+      if (state.count > 400) break;
+      if (TREE_IGNORE.has(d.name) || d.name.startsWith('.')) continue;
 
       const fullPath = path.join(targetDir, d.name);
       try {
         if (d.isDirectory()) {
           state.count++;
+          const hasChildren = await dirHasVisibleChildren(fullPath);
           items.push({
             name: d.name,
             type: 'directory',
             path: fullPath,
+            hasChildren,
             children: depth < maxDepth ? await buildWorkspaceDirectoryTreeAsync(fullPath, depth + 1, maxDepth, state) : []
           });
         } else if (d.isFile()) {
@@ -1551,6 +1886,372 @@ function renameThread(threadId, title) {
   return name;
 }
 
+let pendingPinMaterialize = false;
+let pinMaterializeInFlight = null;
+let lastMaterializeAttemptAt = 0;
+let suppressGlobalStateWatchUntil = 0;
+let desktopProcCache = { at: 0, running: false };
+let lastSeenDesktopPins = null;
+let lastSeenArchivedIds = null;
+const MATERIALIZE_MIN_INTERVAL_MS = 2000;
+
+function loadMergedPinMap() {
+  const pinMap = loadPinMapFromFile(PINS_PATH);
+  for (const [key, rec] of pinOverrideMap) {
+    const prev = pinMap.get(key);
+    if (!prev || (rec.upd || '') >= (prev.upd || '')) pinMap.set(key, rec);
+  }
+  return pinMap;
+}
+
+function resolveProjectPinId(id) {
+  const catalog = loadDesktopProjectCatalog();
+  const local = catalog.localProjects || {};
+  if (local[id]) return local[id].id || id;
+  for (const [pid, project] of Object.entries(local)) {
+    if (!project) continue;
+    if (project.id === id || project.name === id) return project.id || pid;
+  }
+  return id;
+}
+
+function pinItem(id, pinned, kind = 'thread') {
+  const nextKind = normalizePinKind(kind);
+  const rawId = String(id || '').trim();
+  if (!rawId) throw new Error('缺少置顶对象');
+  const targetId = nextKind === 'project' ? resolveProjectPinId(rawId) : rawId;
+  const upd = new Date().toISOString();
+  const rec = {
+    id: targetId,
+    kind: nextKind,
+    pinned: !!pinned,
+    upd,
+    source: 'remote',
+  };
+  pinOverrideMap.set(pinKey(nextKind, targetId), rec);
+  if (nextKind === 'project' && rawId !== targetId) {
+    pinOverrideMap.set(pinKey('project', rawId), { ...rec, id: rawId });
+  }
+  try {
+    fs.appendFileSync(PINS_PATH, pinRecordToLine(rec) + '\n', 'utf-8');
+  } catch (e) {
+    console.warn('[pinItem] pins.jsonl append failed (using memory override):', e.message);
+  }
+  pendingPinMaterialize = true;
+  return rec;
+}
+
+function loadMergedArchiveMap() {
+  const archiveMap = loadArchiveMapFromFile(ARCHIVES_PATH);
+  for (const [id, rec] of archiveOverrideMap) {
+    const prev = archiveMap.get(id);
+    if (!prev || (rec.upd || '') >= (prev.upd || '')) archiveMap.set(id, rec);
+  }
+  return archiveMap;
+}
+
+function catalogArchivedIds() {
+  const ids = [];
+  for (const [id, meta] of threadMetaCache) {
+    if (meta && meta.isArchived) ids.push(id);
+  }
+  return ids;
+}
+
+function archiveItem(id, archived) {
+  const targetId = String(id || '').trim();
+  if (!targetId) throw new Error('缺少归档对象');
+  const upd = new Date().toISOString();
+  const rec = {
+    id: targetId,
+    archived: !!archived,
+    upd,
+    source: 'remote',
+  };
+  archiveOverrideMap.set(targetId, rec);
+  try {
+    fs.appendFileSync(ARCHIVES_PATH, archiveRecordToLine(rec) + '\n', 'utf-8');
+  } catch (e) {
+    console.warn('[archiveItem] archives.jsonl append failed (using memory override):', e.message);
+  }
+  pendingPinMaterialize = true;
+  return rec;
+}
+
+function tasklistHasImage(name) {
+  try {
+    const out = execSync(`tasklist /FI "IMAGENAME eq ${name}" /NH`, {
+      encoding: 'utf8',
+      timeout: 2500,
+      windowsHide: true,
+    });
+    return new RegExp(String(name).replace(/\./g, '\\.'), 'i').test(out)
+      && !/No tasks|没有运行/i.test(out);
+  } catch {
+    return false;
+  }
+}
+
+function isCodexDesktopProcessRunning() {
+  const now = Date.now();
+  if (now - desktopProcCache.at < 2500) return desktopProcCache.running;
+  let running = false;
+  if (process.platform === 'win32') {
+    running = tasklistHasImage('Codex.exe') || tasklistHasImage('ChatGPT.exe');
+  } else {
+    try {
+      const out = execSync('ps -A -o comm=', { encoding: 'utf8', timeout: 2500 });
+      running = /(^|[\\/])(Codex|ChatGPT)(\.exe)?$/im.test(out);
+    } catch {
+      running = false;
+    }
+  }
+  desktopProcCache = { at: now, running };
+  return running;
+}
+
+async function desktopMetadataIdle() {
+  // global-state / sqlite 是 Desktop 自己的 UI 存储；进程还在时写入会被下次 persist 盖掉，也更接近活锁。
+  if (isCodexDesktopProcessRunning()) {
+    return { idle: false, reason: 'desktop_running' };
+  }
+  const locks = getActiveLockThreadIds();
+  for (const lockedId of locks) {
+    const age = writerLockAgeMs(lockedId);
+    if (age != null && age < STALE_WRITER_LOCK_MS) {
+      if (threadIsLive(lockedId)) return { idle: false, reason: 'live_turn' };
+      const ownerId = await discoverThreadOwner(getIpcClient(), lockedId).catch(() => null);
+      if (ownerId) return { idle: false, reason: 'owner' };
+    }
+  }
+  return { idle: true, reason: 'idle' };
+}
+
+function materializePinsToSqlite(desired, desiredArchived) {
+  const dbPath = path.join(CODEX_HOME, 'state_5.sqlite');
+  if (!fs.existsSync(dbPath)) return { ok: false, reason: 'no_db' };
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec('PRAGMA busy_timeout = 800');
+    const rows = db.prepare('SELECT id, is_pinned, archived FROM threads').all();
+    const wantedPin = new Set(desired.threadIds || []);
+    const wantedArch = new Set(desiredArchived || []);
+    const upd = db.prepare('UPDATE threads SET is_pinned = ?, archived = ? WHERE id = ?');
+    let changed = 0;
+    const seen = new Set();
+    for (const row of rows) {
+      if (!row.id || seen.has(row.id)) continue;
+      seen.add(row.id);
+      const nextPin = wantedPin.has(row.id) ? 1 : 0;
+      const nextArch = wantedArch.has(row.id) ? 1 : 0;
+      if ((row.is_pinned ? 1 : 0) === nextPin && (row.archived ? 1 : 0) === nextArch) continue;
+      upd.run(nextPin, nextArch, row.id);
+      changed += 1;
+    }
+    return { ok: true, changed };
+  } finally {
+    try { db.close(); } catch { /* ignore */ }
+  }
+}
+
+async function materializePinsIfSafe({ force = false } = {}) {
+  if (pinMaterializeInFlight) return pinMaterializeInFlight;
+  pinMaterializeInFlight = (async () => {
+    try {
+      if (!force && Date.now() - lastMaterializeAttemptAt < MATERIALIZE_MIN_INTERVAL_MS) {
+        pendingPinMaterialize = true;
+        return { ok: false, pending: true, reason: 'throttled' };
+      }
+      lastMaterializeAttemptAt = Date.now();
+      const idle = await desktopMetadataIdle();
+      if (!idle.idle) {
+        pendingPinMaterialize = true;
+        return { ok: false, pending: true, reason: idle.reason };
+      }
+      const catalog = loadDesktopProjectCatalog();
+      const pinMap = loadMergedPinMap();
+      const desired = collectDesiredPinIds({
+        catalogThreadIds: catalog.pinnedThreadIds || [],
+        catalogProjectIds: catalog.pinnedProjectIds || [],
+        overrideMap: pinOverrideMap,
+        pinMap,
+      });
+      const desiredArchived = collectDesiredArchivedIds({
+        catalogArchivedIds: catalogArchivedIds(),
+        overrideMap: archiveOverrideMap,
+        archiveMap: loadMergedArchiveMap(),
+      });
+      const current = {
+        threadIds: catalog.pinnedThreadIds || [],
+        projectIds: catalog.pinnedProjectIds || [],
+      };
+      let wroteState = false;
+      if (!pinSetsEqual(desired, current) || force) {
+        if (fs.existsSync(DESKTOP_STATE_PATH)) {
+          const raw = fs.readFileSync(DESKTOP_STATE_PATH, 'utf8');
+          const data = JSON.parse(raw);
+          const next = applyPinsToGlobalState(data, desired);
+          const indent = detectJsonIndent(raw);
+          suppressGlobalStateWatchUntil = Date.now() + 1500;
+          atomicWriteFile(DESKTOP_STATE_PATH, `${JSON.stringify(next, null, indent)}${raw.endsWith('\n') ? '\n' : ''}`);
+          desktopProjectCatalog.loaded = false;
+          wroteState = true;
+        }
+      }
+      let sqlite = { ok: false };
+      try {
+        sqlite = materializePinsToSqlite(desired, desiredArchived);
+        if (sqlite.ok) {
+          loadThreadMetaCache(true);
+          lastSeenArchivedIds = catalogArchivedIds();
+        }
+      } catch (e) {
+        console.warn('[pins] sqlite materialize skipped:', e.message);
+      }
+      pendingPinMaterialize = false;
+      lastSeenDesktopPins = desired;
+      return { ok: true, wroteState, sqlite, reason: idle.reason };
+    } catch (e) {
+      console.warn('[pins] materialize failed:', e.message);
+      pendingPinMaterialize = true;
+      return { ok: false, pending: true, reason: e.message };
+    } finally {
+      pinMaterializeInFlight = null;
+    }
+  })();
+  return pinMaterializeInFlight;
+}
+
+function applyDesktopArchiveUpdates(updates) {
+  if (!updates.length) return false;
+  const upd = new Date().toISOString();
+  for (const item of updates) {
+    const rec = {
+      id: item.id,
+      archived: !!item.archived,
+      upd,
+      source: 'desktop',
+    };
+    archiveOverrideMap.set(item.id, rec);
+    try {
+      fs.appendFileSync(ARCHIVES_PATH, archiveRecordToLine(rec) + '\n', 'utf-8');
+    } catch (e) {
+      console.warn('[archive] desktop reconcile append failed:', e.message);
+    }
+  }
+  return true;
+}
+
+function reconcileArchivesFromSqlite() {
+  const curr = catalogArchivedIds();
+  if (!lastSeenArchivedIds) {
+    lastSeenArchivedIds = curr;
+    return false;
+  }
+  const updates = reconcileDesktopArchiveChange({
+    prevArchivedIds: lastSeenArchivedIds,
+    catalogArchivedIds: curr,
+  });
+  lastSeenArchivedIds = curr;
+  return applyDesktopArchiveUpdates(updates);
+}
+
+function applyDesktopPinUpdates(updates) {
+  if (!updates.length) return false;
+  const upd = new Date().toISOString();
+  for (const item of updates) {
+    const rec = {
+      id: item.id,
+      kind: item.kind,
+      pinned: !!item.pinned,
+      upd,
+      source: 'desktop',
+    };
+    pinOverrideMap.set(pinKey(item.kind, item.id), rec);
+    try {
+      fs.appendFileSync(PINS_PATH, pinRecordToLine(rec) + '\n', 'utf-8');
+    } catch (e) {
+      console.warn('[pins] desktop reconcile append failed:', e.message);
+    }
+  }
+  return true;
+}
+
+function snapshotDesktopPins(catalog) {
+  return {
+    threadIds: [...(catalog.pinnedThreadIds || [])],
+    projectIds: [...(catalog.pinnedProjectIds || [])],
+  };
+}
+
+function reconcilePinsFromDesktop() {
+  if (Date.now() < suppressGlobalStateWatchUntil) return false;
+  desktopProjectCatalog.loaded = false;
+  const catalog = loadDesktopProjectCatalog();
+  const curr = snapshotDesktopPins(catalog);
+  if (!lastSeenDesktopPins) {
+    lastSeenDesktopPins = curr;
+    return false;
+  }
+  const updates = reconcileDesktopPinChange({
+    prevThreadIds: lastSeenDesktopPins.threadIds,
+    prevProjectIds: lastSeenDesktopPins.projectIds,
+    catalogThreadIds: curr.threadIds,
+    catalogProjectIds: curr.projectIds,
+  });
+  lastSeenDesktopPins = curr;
+  return applyDesktopPinUpdates(updates);
+}
+
+function schedulePinMaterialize() {
+  pendingPinMaterialize = true;
+  materializePinsIfSafe().catch(() => {});
+}
+
+let globalStateWatchTimer = null;
+function onGlobalStateMaybeChanged() {
+  if (globalStateWatchTimer) return;
+  globalStateWatchTimer = setTimeout(() => {
+    globalStateWatchTimer = null;
+    try {
+      const changed = reconcilePinsFromDesktop();
+      if (changed) broadcastToClients({ type: 'thread_list', data: getThreadList() });
+      else if (pendingPinMaterialize) schedulePinMaterialize();
+    } catch { /* ignore */ }
+  }, 400);
+}
+
+function watchGlobalStateFile() {
+  try {
+    lastSeenDesktopPins = snapshotDesktopPins(loadDesktopProjectCatalog());
+  } catch {
+    lastSeenDesktopPins = { threadIds: [], projectIds: [] };
+  }
+  try {
+    const dir = path.dirname(DESKTOP_STATE_PATH);
+    if (fs.existsSync(dir)) {
+      fs.watch(dir, (_event, filename) => {
+        const name = String(filename || '');
+        if (name && !name.includes('codex-global-state')) return;
+        onGlobalStateMaybeChanged();
+      });
+    }
+  } catch (e) {
+    console.warn('[global-state watch] unavailable:', e.message);
+  }
+  // Windows 原子替换会弄丢单文件 watch，mtime 轮询始终兜底。
+  setInterval(() => {
+    try {
+      if (!fs.existsSync(DESKTOP_STATE_PATH)) return;
+      const st = fs.statSync(DESKTOP_STATE_PATH);
+      if (desktopProjectCatalog.loaded && desktopProjectCatalog.mtimeMs === st.mtimeMs) return;
+      onGlobalStateMaybeChanged();
+    } catch { /* ignore */ }
+  }, 2500);
+}
+watchGlobalStateFile();
+
 // ----------------------------------------------------
 // HTTP Static File & REST API Server (gzip + in-memory static cache)
 // ----------------------------------------------------
@@ -1579,7 +2280,8 @@ function preloadStaticAssets(dir = PUBLIC_DIR) {
       } catch (e) {}
     }
     if (dir === PUBLIC_DIR) {
-      console.log(`[Static Cache] Preloaded ${staticCache.size} files from public/`);
+      const kind = /dist-web|mobile/.test(PUBLIC_DIR.replace(/\\/g, '/')) ? 'expo-web' : 'pwa';
+      console.log(`[Static Cache] Preloaded ${staticCache.size} files from ${PUBLIC_DIR} (${kind})`);
     }
   } catch (e) {}
 }
@@ -1658,6 +2360,7 @@ function isLoopbackIp(ip) {
 }
 
 function isLoopbackReq(req) {
+  if (isForwardedRequest(req)) return false;
   return isLoopbackIp(req.socket?.remoteAddress || '');
 }
 
@@ -1692,16 +2395,22 @@ function handleHostApi(req, res, reqUrl) {
     return sendJson(req, res, 403, { success: false, error: '仅本机可打开主机台' });
   }
   if (reqUrl.pathname === '/api/host/status' && req.method === 'GET') {
-    return sendJson(req, res, 200, {
-      success: true,
-      hubId: identity.hubId,
-      port: PORT,
-      relay: relayPublicState(),
-      lanCount: [...lanClients.values()].filter((ws) => !isLoopbackIp(ws.clientIp)).length,
-      password: auth.hostPassword || '',
-      lanCode: localLanCode,
-      lanUrls: listLanUrls(PORT),
+    expoWebDevUp((up) => {
+      sendJson(req, res, 200, {
+        success: true,
+        hubId: identity.hubId,
+        port: PORT,
+        relay: relayPublicState(),
+        lanCount: [...lanClients.values()].filter((ws) => !isLoopbackIp(ws.clientIp)).length,
+        password: auth.hostPassword || '',
+        lanCode: localLanCode,
+        lanUrls: listLanUrls(PORT),
+        expoWebPort: EXPO_WEB_PORT,
+        expoWebUrl: up ? `${EXPO_WEB_ORIGIN}/` : '',
+        appUrl: up ? `${EXPO_WEB_ORIGIN}/` : '/',
+      });
     });
+    return;
   }
   if (reqUrl.pathname === '/api/host/pair-code' && req.method === 'GET') {
     (async () => {
@@ -1810,6 +2519,23 @@ function handleHostApi(req, res, reqUrl) {
     });
     return;
   }
+  if (reqUrl.pathname === '/api/host/sync-pins' && req.method === 'POST') {
+    (async () => {
+      try {
+        const result = await materializePinsIfSafe({ force: true });
+        sendJson(req, res, 200, {
+          success: true,
+          pending: !!result.pending,
+          materialized: !!result.ok && !result.pending,
+          reason: result.reason || (result.ok ? 'ok' : 'pending'),
+          wroteState: !!result.wroteState,
+        });
+      } catch (err) {
+        sendJson(req, res, 500, { success: false, error: err.message || '同步失败' });
+      }
+    })();
+    return;
+  }
   return sendJson(req, res, 404, { success: false, error: 'unknown host api' });
 }
 
@@ -1893,6 +2619,17 @@ function pushToAllDevices(payload) {
 
 const server = http.createServer((req, res) => {
   const reqUrl = new URL(req.url, `http://${req.headers.host}`);
+
+  if (req.method === 'GET' && (reqUrl.pathname === '/' || reqUrl.pathname === '/index.html')) {
+    expoWebDevUp((up) => {
+      if (up) {
+        res.writeHead(302, { Location: `${EXPO_WEB_ORIGIN}/`, 'Cache-Control': 'no-store' });
+        return res.end();
+      }
+      servePublicFile(req, res, reqUrl);
+    });
+    return;
+  }
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, corsHeaders(req));
@@ -2003,6 +2740,51 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (reqUrl.pathname === '/api/threads/pin' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+      if (body.length > 1e6) req.destroy();
+    });
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body || '{}');
+        const kind = parsed.kind === 'project' ? 'project' : 'thread';
+        const id = String(parsed.id || parsed.threadId || parsed.projectId || '').trim();
+        const rec = pinItem(id, parsed.pinned !== false && parsed.pinned !== 0, kind);
+        const threadData = getThreadList();
+        broadcastToClients({ type: 'thread_list', data: threadData });
+        schedulePinMaterialize();
+        sendJson(req, res, 200, { success: true, id: rec.id, kind: rec.kind, pinned: rec.pinned });
+      } catch (e) {
+        sendJson(req, res, 400, { success: false, error: e.message });
+      }
+    });
+    return;
+  }
+
+  if (reqUrl.pathname === '/api/threads/archive' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+      if (body.length > 1e6) req.destroy();
+    });
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body || '{}');
+        const id = String(parsed.id || parsed.threadId || '').trim();
+        const rec = archiveItem(id, parsed.archived !== false && parsed.archived !== 0);
+        const threadData = getThreadList();
+        broadcastToClients({ type: 'thread_list', data: threadData });
+        schedulePinMaterialize();
+        sendJson(req, res, 200, { success: true, id: rec.id, archived: rec.archived });
+      } catch (e) {
+        sendJson(req, res, 400, { success: false, error: e.message });
+      }
+    });
+    return;
+  }
+
   if (reqUrl.pathname === '/api/threads/rename' && req.method === 'POST') {
     let body = '';
     req.on('data', (c) => {
@@ -2098,12 +2880,14 @@ const server = http.createServer((req, res) => {
 
     (async () => {
       try {
-        const tree = await buildWorkspaceDirectoryTreeAsync(targetCwd);
+        const sub = reqUrl.searchParams.get('path') || targetCwd;
+        const tree = await buildWorkspaceDirectoryTreeAsync(sub, 0, 0);
         const rootName = path.basename(path.normalize(targetCwd));
         sendJson(req, res, 200, {
           success: true,
           rootName,
           rootPath: targetCwd,
+          path: sub,
           tree
         });
       } catch (err) {
@@ -2111,6 +2895,17 @@ const server = http.createServer((req, res) => {
       }
     })();
     return;
+  }
+
+  if (reqUrl.pathname === '/api/workspace-search') {
+    const cwd = reqUrl.searchParams.get('cwd') || pickDefaultCwd();
+    const q = reqUrl.searchParams.get('q') || '';
+    return sendJson(req, res, 200, { success: true, cwd, q, hits: searchWorkspaceFiles(cwd, q) });
+  }
+
+  if (reqUrl.pathname === '/api/artifacts') {
+    const cwd = reqUrl.searchParams.get('cwd') || pickDefaultCwd();
+    return sendJson(req, res, 200, { success: true, cwd, files: listArtifactFiles(cwd) });
   }
 
   if (reqUrl.pathname === '/api/models' && req.method === 'GET') {
@@ -2183,16 +2978,35 @@ const server = http.createServer((req, res) => {
         const servers = Array.isArray(result?.data) ? result.data : [];
         sendJson(req, res, 200, {
           success: true,
-          servers: servers.map((server) => ({
-            name: server.name,
-            authStatus: server.authStatus || null,
-            toolCount: server.tools ? Object.keys(server.tools).length : 0
-          }))
+          servers: servers.map((server) => summarizeMcpServer(server))
         });
       } catch (err) {
         sendJson(req, res, 500, { success: false, error: err.message, servers: [] });
       }
     })();
+    return;
+  }
+
+  if (reqUrl.pathname === '/api/plugins' && req.method === 'GET') {
+    try {
+      return sendJson(req, res, 200, { success: true, plugins: plugins.list() });
+    } catch (err) {
+      return sendJson(req, res, 500, { success: false, error: err.message, plugins: [] });
+    }
+  }
+
+  if (reqUrl.pathname === '/api/plugins/config' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 65536) req.destroy(); });
+    req.on('end', () => {
+      try {
+        const parsed = JSON.parse(body || '{}');
+        const list = plugins.setEnabled(parsed.id || parsed.name, !!parsed.enabled);
+        sendJson(req, res, 200, { success: true, plugins: list });
+      } catch (err) {
+        sendJson(req, res, 500, { success: false, error: err.message, plugins: [] });
+      }
+    });
     return;
   }
 
@@ -2257,7 +3071,34 @@ const server = http.createServer((req, res) => {
     }
 
     const ext = path.extname(filePath).toLowerCase();
-    const isImg = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp'].includes(ext);
+    const rawMime = RAW_IMAGE_MIME[ext];
+    const isImg = Boolean(rawMime) || ext === '.svg';
+    const wantRaw = reqUrl.searchParams.get('raw') === '1' || reqUrl.searchParams.get('raw') === 'true';
+
+    if (wantRaw && rawMime) {
+      fs.stat(filePath, (statErr, st) => {
+        if (statErr) {
+          return sendJson(req, res, 500, { success: false, error: `Error reading file: ${statErr.message}` });
+        }
+        if (st.size > FILE_RAW_LIMIT) {
+          return sendJson(req, res, 413, { success: false, error: '图片过大，请点开预览' });
+        }
+        fs.readFile(filePath, (readErr, buffer) => {
+          if (readErr) {
+            return sendJson(req, res, 500, { success: false, error: `Error reading file: ${readErr.message}` });
+          }
+          res.writeHead(200, {
+            ...corsHeaders(req),
+            'Content-Type': rawMime,
+            'Content-Length': buffer.length,
+            'Cache-Control': 'private, max-age=120',
+            'X-Content-Type-Options': 'nosniff',
+          });
+          res.end(buffer);
+        });
+      });
+      return;
+    }
 
     if (isImg) {
       fs.readFile(filePath, (readErr, buffer) => {
@@ -2338,7 +3179,11 @@ const server = http.createServer((req, res) => {
     }
   }
 
-  // ---- 静态资源 ----
+  // ---- 静态资源（优先 Expo Web dist-web，否则旧 PWA）----
+  servePublicFile(req, res, reqUrl);
+});
+
+function servePublicFile(req, res, reqUrl) {
   let pathname = reqUrl.pathname;
   try { pathname = decodeURIComponent(pathname); } catch (e) {}
   let filePath = path.join(PUBLIC_DIR, pathname === '/' ? 'index.html' : pathname);
@@ -2363,6 +3208,15 @@ const server = http.createServer((req, res) => {
   } else {
     body = staticCache.get(resolved);
   }
+  if (!body && (!ext || ext === '.html')) {
+    const spa = path.join(PUBLIC_DIR, 'index.html');
+    try {
+      body = fs.readFileSync(spa);
+      staticCache.set(spa, body);
+    } catch {
+      body = staticCache.get(spa) || null;
+    }
+  }
   if (!body) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     return res.end('404 Not Found');
@@ -2373,7 +3227,7 @@ const server = http.createServer((req, res) => {
     'Pragma': 'no-cache',
     'Expires': '0'
   });
-});
+}
 
 // ----------------------------------------------------
 // WebSocket Server for Live Stream & Remote Actions
@@ -2496,63 +3350,91 @@ async function createThreadSmart(targetCwd, title = '新聊天', opts = {}) {
   return { threadId: fallback.threadId, real: false, title: nextTitle };
 }
 
-async function handleRemoteSend(ws, threadId, text, isSteer, rawInput) {
+function collaborationModeOf(mode) {
+  const raw = String(mode || '').toLowerCase();
+  if (raw === 'plan') return 'plan';
+  return null;
+}
+
+async function handleRemoteSend(ws, threadId, text, isSteer, rawInput, mode) {
   const action = isSteer ? 'Steer' : 'Send';
   const input = normalizeInput(rawInput, text);
+  const extra = { collaborationMode: collaborationModeOf(mode), mode: collaborationModeOf(mode) };
   if (!input.length) {
-    ws.send(JSON.stringify({ type: 'action_feedback', status: 'error', message: `${action} 失败: 内容为空` }));
+    ws.send(JSON.stringify({
+      type: 'action_feedback',
+      status: 'error',
+      threadId,
+      action: isSteer ? 'steer' : 'send',
+      message: `${action} 失败: 内容为空`
+    }));
     return;
   }
   console.log(`[Remote Action] ${isSteer ? 'steer' : 'send'} to thread ${threadId}: ${String(text || '').slice(0, 80)}`);
   try {
     const ipc = getIpcClient();
-    let ownerId = null;
-    try {
-      ownerId = await ipc.findOwner(threadId);
-    } catch (error) {
-      console.warn(`[ipc] findOwner failed: ${error.message}`);
-    }
-    console.log(`[Remote Action] owner=${ownerId || 'none'} thread=${threadId}`);
-    if (ownerId) {
-      if (isSteer) await ipc.steerTurn(threadId, input, ownerId);
-      else await ipc.startTurn(threadId, input, ownerId);
+    const client = getCodex();
+    await client.ensureStarted();
+    let ownerId = await discoverThreadOwner(ipc, threadId);
+    console.log(`[Remote Action] owner=${ownerId || 'none'} thread=${threadId} live=${threadIsLive(threadId)}`);
+
+    if (!ownerId && !client.ownedThreads.has(threadId) && threadIsLive(threadId)) {
       ws.send(JSON.stringify({
         type: 'action_feedback',
         status: 'success',
-        message: `${action} 已交给持锁端（follower）`
+        threadId,
+        action: isSteer ? 'steer' : 'send',
+        interim: true,
+        message: '桌面还在跑，等待结束后再发（不抢锁）'
+      }));
+      const waited = await waitForOwnerOrIdle(ipc, threadId);
+      ownerId = waited.ownerId;
+      if (!ownerId && waited.live) {
+        throw new Error('桌面仍在运行该会话，已避免抢锁中断任务；请等结束后再发，或在桌面打开该会话后重试');
+      }
+    }
+
+    const followed = ownerId ? await tryFollowerSend(ipc, threadId, input, isSteer, ownerId, extra) : { ok: false };
+    if (followed.ok) {
+      ws.send(JSON.stringify({
+        type: 'action_feedback',
+        status: 'success',
+        threadId,
+        action: followed.action,
+        message: `${followed.action === 'steer' ? 'Steer' : 'Send'} 已交给持锁端（follower）`
       }));
       return;
     }
 
-    if (getActiveLockThreadIds().has(threadId)) {
-      throw new Error('桌面/VSCode 正在占用该会话，但管道未找到 owner；请确认桌面已打开该会话后重试');
+    if (!client.ownedThreads.has(threadId)) {
+      await resumeLocalWriter(client, threadId);
     }
 
-    const client = getCodex();
-    await client.ensureStarted();
-    if (!client.ownedThreads.has(threadId)) {
-      await client.resumeThread(threadId);
-    }
-    if (isSteer) {
-      await client.steerTurn({
-        threadId,
-        text,
-        input,
-        expectedTurnId: client.currentTurnByThread.get(threadId) || null,
-      });
-    } else {
-      await client.sendUserTurn({ threadId, text, input });
-    }
+    const sentAction = await sendLocalUserOrSteer(client, threadId, text, input, isSteer, extra);
     ws.send(JSON.stringify({
       type: 'action_feedback',
       status: 'success',
-      message: `${action} 已提交，回复将实时推送到本页`
+      threadId,
+      action: sentAction,
+      message: `${sentAction === 'steer' ? 'Steer' : 'Send'} 已提交，回复将实时推送到本页`
     }));
   } catch (e) {
+    const raw = String(e.message || e || '');
+    const quota = accountQuotaCache.value || {};
+    const quotaHit = isQuotaError(raw) || isQuotaExhausted(quota);
     const message = isWriterLockError(e)
       ? '该会话正由 Codex 桌面占用（写入锁冲突），请稍后再试'
-      : `${action} 失败: ${e.message}`;
-    ws.send(JSON.stringify({ type: 'action_feedback', status: 'error', message }));
+      : quotaHit
+        ? quotaExhaustedMessage(quota, raw)
+        : `${action} 失败: ${raw}`;
+    ws.send(JSON.stringify({
+      type: 'action_feedback',
+      status: 'error',
+      threadId,
+      action: isSteer ? 'steer' : 'send',
+      code: quotaHit ? 'quota' : 'error',
+      message
+    }));
   }
 }
 
@@ -2580,6 +3462,37 @@ function packFileForClient(filePath) {
     return { encoding: 'base64', content: buf.toString('base64'), truncated };
   }
   return { encoding: 'utf8', content: buf.toString('utf8'), truncated };
+}
+
+async function listSkillsForClient(cwd) {
+  const client = getCodex();
+  const result = await client.listSkills(cwd || '');
+  const groups = Array.isArray(result?.data) ? result.data : [];
+  return groups.flatMap((group) => Array.isArray(group.skills) ? group.skills : []);
+}
+
+function summarizeMcpServer(server) {
+  const toolsObj = server?.tools && typeof server.tools === 'object' ? server.tools : {};
+  const toolNames = Array.isArray(server?.toolNames)
+    ? server.toolNames
+    : Object.keys(toolsObj);
+  const auth = server?.authStatus || server?.auth || null;
+  const needsAuth = /need|unauth|expired|login|oauth|required/i.test(String(auth || ''));
+  return {
+    name: server?.name || '',
+    authStatus: auth,
+    needsAuth,
+    toolCount: toolNames.length,
+    tools: toolNames.slice(0, 24),
+    error: server?.error || server?.statusMessage || null,
+  };
+}
+
+async function listMcpForClient() {
+  const client = getCodex();
+  const result = await client.listMcpServers();
+  const servers = Array.isArray(result?.data) ? result.data : [];
+  return servers.map((server) => summarizeMcpServer(server));
 }
 
 async function listModelsForClient() {
@@ -2612,6 +3525,7 @@ async function handleClientMessage(ws, msg) {
       hostName: localHostName()
     }));
     getAccountQuota().catch(() => {});
+    if (pendingPinMaterialize) schedulePinMaterialize();
   }
 
   else if (type === 'get_config') {
@@ -2659,6 +3573,7 @@ async function handleClientMessage(ws, msg) {
       ws.send(JSON.stringify({
         type: 'action_feedback',
         status: 'error',
+        action: 'create_thread',
         message: `新建会话失败: ${e.message}`
       }));
     }
@@ -2679,6 +3594,64 @@ async function handleClientMessage(ws, msg) {
     }
   }
 
+  else if (type === 'pin_item' || type === 'pin_thread' || type === 'unpin_thread' || type === 'pin_project' || type === 'unpin_project') {
+    try {
+      const kind = (type === 'pin_project' || type === 'unpin_project' || msg.kind === 'project') ? 'project' : 'thread';
+      const id = String(msg.id || msg.projectId || msg.threadId || threadId || '').trim();
+      const pinned = (type === 'unpin_thread' || type === 'unpin_project')
+        ? false
+        : (Object.prototype.hasOwnProperty.call(msg, 'pinned') ? !!msg.pinned : true);
+      const rec = pinItem(id, pinned, kind);
+      const threadData = getThreadList();
+      broadcastToClients({ type: 'thread_list', data: threadData });
+      ws.send(JSON.stringify({
+        type: 'action_feedback',
+        status: 'success',
+        action: 'pin_item',
+        kind: rec.kind,
+        id: rec.id,
+        pinned: rec.pinned,
+        message: rec.pinned ? '已置顶' : '已取消置顶',
+      }));
+      schedulePinMaterialize();
+    } catch (e) {
+      ws.send(JSON.stringify({
+        type: 'action_feedback',
+        status: 'error',
+        action: 'pin_item',
+        message: `置顶失败: ${e.message}`,
+      }));
+    }
+  }
+
+  else if (type === 'archive_item' || type === 'archive_thread' || type === 'unarchive_thread') {
+    try {
+      const id = String(msg.id || msg.threadId || threadId || '').trim();
+      const archived = type === 'unarchive_thread'
+        ? false
+        : (Object.prototype.hasOwnProperty.call(msg, 'archived') ? !!msg.archived : true);
+      const rec = archiveItem(id, archived);
+      const threadData = getThreadList();
+      broadcastToClients({ type: 'thread_list', data: threadData });
+      ws.send(JSON.stringify({
+        type: 'action_feedback',
+        status: 'success',
+        action: 'archive_item',
+        id: rec.id,
+        archived: rec.archived,
+        message: rec.archived ? '已归档' : '已取消归档',
+      }));
+      schedulePinMaterialize();
+    } catch (e) {
+      ws.send(JSON.stringify({
+        type: 'action_feedback',
+        status: 'error',
+        action: 'archive_item',
+        message: `归档失败: ${e.message}`,
+      }));
+    }
+  }
+
   else if (type === 'get_thread_history') {
     if (!threadId) return;
     const rolloutPath = findRolloutFilePathFast(threadId);
@@ -2691,21 +3664,24 @@ async function handleClientMessage(ws, msg) {
 
   else if (type === 'send_message') {
     if (!threadId) return;
-    handleRemoteSend(ws, threadId, text, false, input);
+    handleRemoteSend(ws, threadId, text, false, input, msg.mode);
   }
 
   else if (type === 'send_steer') {
     if (!threadId) return;
-    handleRemoteSend(ws, threadId, text, true, input);
+    handleRemoteSend(ws, threadId, text, true, input, msg.mode);
   }
 
   else if (type === 'send_stop') {
     if (!threadId) return;
-    console.log(`[Remote Action] Interrupt/Stop thread ${threadId}`);
+      console.log(`[Remote Action] Interrupt/Stop thread ${threadId}`);
     (async () => {
       try {
         const ipc = getIpcClient();
-        const ownerId = await ipc.findOwner(threadId).catch(() => null);
+        let ownerId = await ipc.findOwner(threadId).catch(() => null);
+        if (!ownerId && threadIsLive(threadId)) {
+          ownerId = (await waitForOwnerOrIdle(ipc, threadId, { timeoutMs: 8000 })).ownerId;
+        }
         if (ownerId) {
           const result = await ipc.interruptTurn(threadId, ownerId);
           ws.send(JSON.stringify({
@@ -2757,33 +3733,22 @@ async function handleClientMessage(ws, msg) {
         const ownerId = await ipc.findOwner(threadId).catch(() => null);
         if (ownerId) {
           const extraIds = Array.isArray(msg.ids) ? msg.ids : [];
-          const cached = rolloutParseState.get(threadId)?.pendingApproval;
-          const candidates = [requestId, ...extraIds, ...(cached?.ids || []), cached?.id]
-            .map((v) => (v == null ? '' : String(v)))
-            .filter(Boolean);
-          const tried = new Set();
-          let lastErr = null;
-          let ok = false;
-          for (const id of candidates) {
-            if (tried.has(id)) continue;
-            tried.add(id);
-            try {
-              await ipc.sendApprovalDecision({
-                conversationId: threadId,
-                requestId: id,
-                decision: normalizeDecision(decision),
-                kind: msg.kind || msg.approvalKind,
-                ownerId,
-              });
-              ok = true;
-              break;
-            } catch (err) {
-              lastErr = err;
-            }
-          }
-          if (!ok) throw lastErr || new Error('follower 审批未命中 requestId');
-          closeParsedApproval(threadId, requestId, 'decided', extraIds);
-          reply('success', '电脑端已接住，正在继续跑', { code: 'ok', desktop: true });
+          const cached = overlayLiveApproval(threadId, rolloutParseState.get(threadId)?.pendingApproval);
+          const liveKind = (desktopPendingForThread(threadId) || [])[0]?.method;
+          const result = await ipc.sendApprovalDecision({
+            conversationId: threadId,
+            requestId,
+            extraIds: [...extraIds, ...(cached?.ids || []), cached?.id],
+            decision: normalizeDecision(decision),
+            kind: msg.kind || msg.approvalKind || liveKind || cached?.type,
+            ownerId,
+          });
+          closeParsedApproval(threadId, result?.requestId || requestId, 'decided', extraIds);
+          reply('success', '电脑端已接住，正在继续跑', {
+            code: 'ok',
+            desktop: true,
+            requestId: result?.requestId || requestId,
+          });
           return;
         }
         const client = getCodex();
@@ -2808,10 +3773,44 @@ async function handleClientMessage(ws, msg) {
     })();
   }
 
+  else if (type === 'stop_command') {
+    const run = liveCommands.get(threadId);
+    if (!run) {
+      ws.send(JSON.stringify({ type: 'action_feedback', status: 'error', threadId, action: 'command', message: '没有运行中的命令' }));
+      return;
+    }
+    run.kill();
+    ws.send(JSON.stringify({ type: 'action_feedback', status: 'success', threadId, action: 'command', message: '已停止命令' }));
+  }
+
+  else if (type === 'search_workspace') {
+    const cwd = msg.cwd || resolveThreadCwd(threadId) || pickDefaultCwd();
+    const q = String(msg.q || msg.query || '').trim();
+    ws.send(JSON.stringify({
+      type: 'workspace_search',
+      threadId: threadId || '',
+      cwd,
+      q,
+      hits: searchWorkspaceFiles(cwd, q),
+      error: null,
+    }));
+  }
+
+  else if (type === 'list_artifacts') {
+    const cwd = msg.cwd || resolveThreadCwd(threadId) || pickDefaultCwd();
+    ws.send(JSON.stringify({
+      type: 'artifacts_list',
+      threadId: threadId || '',
+      cwd,
+      files: listArtifactFiles(cwd),
+      error: null,
+    }));
+  }
+
   else if (type === 'run_command') {
     const cwd = resolveThreadCwd(threadId);
     if (!cwd) {
-      ws.send(JSON.stringify({ type: 'action_feedback', status: 'error', message: '会话没有工作目录' }));
+      ws.send(JSON.stringify({ type: 'action_feedback', status: 'error', threadId, action: 'command', message: '会话没有工作目录' }));
       return;
     }
     try {
@@ -2828,6 +3827,8 @@ async function handleClientMessage(ws, msg) {
       ws.send(JSON.stringify({
         type: 'action_feedback',
         status: 'success',
+        threadId,
+        action: 'command',
         message: `命令已启动（${path.basename(cwd)}）`
       }));
       run.done.then((result) => {
@@ -2843,7 +3844,7 @@ async function handleClientMessage(ws, msg) {
         }));
       });
     } catch (e) {
-      ws.send(JSON.stringify({ type: 'action_feedback', status: 'error', message: `命令失败: ${e.message}` }));
+      ws.send(JSON.stringify({ type: 'action_feedback', status: 'error', threadId, action: 'command', message: `命令失败: ${e.message}` }));
     }
   }
 
@@ -2937,15 +3938,86 @@ async function handleClientMessage(ws, msg) {
     })();
   }
 
+  else if (type === 'get_skills') {
+    (async () => {
+      try {
+        const cwd = msg.cwd || resolveThreadCwd(threadId) || pickDefaultCwd();
+        ws.send(JSON.stringify({ type: 'skills_list', skills: await listSkillsForClient(cwd), error: null }));
+      } catch (e) {
+        ws.send(JSON.stringify({ type: 'skills_list', skills: [], error: e.message || '无法读取技能' }));
+      }
+    })();
+  }
+
+  else if (type === 'set_skill') {
+    (async () => {
+      try {
+        const client = getCodex();
+        await client.writeSkillConfig({
+          path: msg.path || null,
+          name: msg.name || null,
+          enabled: !!msg.enabled,
+        });
+        const cwd = msg.cwd || resolveThreadCwd(threadId) || pickDefaultCwd();
+        const skills = await listSkillsForClient(cwd);
+        broadcastToClients({ type: 'skills_list', skills, error: null });
+      } catch (e) {
+        ws.send(JSON.stringify({ type: 'skills_list', skills: [], error: e.message || '无法更新技能' }));
+      }
+    })();
+  }
+
+  else if (type === 'get_mcp') {
+    (async () => {
+      try {
+        ws.send(JSON.stringify({ type: 'mcp_list', servers: await listMcpForClient(), error: null }));
+      } catch (e) {
+        ws.send(JSON.stringify({ type: 'mcp_list', servers: [], error: e.message || '无法读取 MCP' }));
+      }
+    })();
+  }
+
+  else if (type === 'get_plugins') {
+    try {
+      ws.send(JSON.stringify({ type: 'plugins_list', plugins: plugins.list(), error: null }));
+    } catch (e) {
+      ws.send(JSON.stringify({ type: 'plugins_list', plugins: [], error: e.message || '无法读取插件' }));
+    }
+  }
+
+  else if (type === 'set_plugin') {
+    try {
+      const list = plugins.setEnabled(msg.id || msg.name, !!msg.enabled);
+      broadcastToClients({ type: 'plugins_list', plugins: list, error: null });
+    } catch (e) {
+      ws.send(JSON.stringify({ type: 'plugins_list', plugins: [], error: e.message || '无法更新插件' }));
+    }
+  }
+
+  else if (type === 'reload_mcp') {
+    (async () => {
+      try {
+        const client = getCodex();
+        await client.reloadMcpServers();
+        const servers = await listMcpForClient();
+        broadcastToClients({ type: 'mcp_list', servers, error: null });
+      } catch (e) {
+        ws.send(JSON.stringify({ type: 'mcp_list', servers: [], error: e.message || '无法重载 MCP' }));
+      }
+    })();
+  }
+
   else if (type === 'get_workspace_tree') {
     (async () => {
       const cwd = msg.cwd || resolveThreadCwd(threadId) || pickDefaultCwd();
+      const target = msg.path || cwd;
       try {
-        const tree = await buildWorkspaceDirectoryTreeAsync(cwd, 0, 2);
+        const tree = await buildWorkspaceDirectoryTreeAsync(target, 0, 0);
         ws.send(JSON.stringify({
           type: 'workspace_tree',
           threadId: threadId || '',
           cwd,
+          path: target,
           rootName: path.basename(cwd) || cwd,
           tree,
           error: null
@@ -2955,6 +4027,7 @@ async function handleClientMessage(ws, msg) {
           type: 'workspace_tree',
           threadId: threadId || '',
           cwd,
+          path: target,
           rootName: '',
           tree: [],
           error: e.message || '无法读取目录'
@@ -3059,16 +4132,17 @@ function pushThreadUpdate(threadId, force = false) {
   if (prevStatus && prevStatus !== newStatus && shouldNotifyThread(threadId)) {
     const threadTitle = getThreadTitleCached(threadId);
     if (newStatus === 'waiting_approval') {
-      if (history.pendingApproval && liveApprovalState(threadId).live !== false && !isParsedApprovalClosed(threadId, history.pendingApproval)) {
-        const at = history.pendingApproval.at || Date.now();
+      const pending = overlayLiveApproval(threadId, history.pendingApproval);
+      if (pending && liveApprovalState(threadId).live !== false && !isParsedApprovalClosed(threadId, pending)) {
+        const at = pending.at || Date.now();
         broadcastToClients({
           type: 'approval_request',
           threadId,
-          requestId: history.pendingApproval.id,
-          ids: history.pendingApproval.ids || [],
-          kind: history.pendingApproval.type,
-          command: history.pendingApproval.command || '',
-          reason: history.pendingApproval.reason || '',
+          requestId: pending.id,
+          ids: pending.ids || [],
+          kind: pending.type,
+          command: pending.command || '',
+          reason: pending.reason || '',
           at,
           expiresAt: at + APPROVAL_TTL_MS
         });
@@ -3249,6 +4323,10 @@ setInterval(() => {
         if (status === 'working' || status === 'waiting_approval') {
           pushThreadUpdate(threadId, true);
         }
+      }
+      if (pendingPinMaterialize) materializePinsIfSafe().catch(() => {});
+      if (loadThreadMetaCache() && reconcileArchivesFromSqlite()) {
+        broadcastToClients({ type: 'thread_list', data: getThreadList() });
       }
     }
 

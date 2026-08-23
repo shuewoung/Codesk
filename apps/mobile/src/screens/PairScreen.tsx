@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { ErrorBanner, GhostButton, PrimaryButton } from '../components/ui';
+import { canLanProbe, discoverHub, isLoopbackHost, isRelayPageHost, pageContext, pageHubUrl } from '../discover';
 import { useSession } from '../session';
 import { radius, space } from '../theme';
 import { useTheme } from '../theme-context';
@@ -8,12 +9,36 @@ import { useTheme } from '../theme-context';
 export function PairScreen({ onScan }: { onScan: () => void }) {
   const session = useSession();
   const { colors } = useTheme();
+  const ctx = pageContext();
+  const colocatedWeb = Platform.OS === 'web' && !isRelayPageHost(ctx.hostname);
+  const loopbackWeb = colocatedWeb && isLoopbackHost(ctx.hostname || '');
+  const impliedHub = colocatedWeb ? (pageHubUrl() || session.lanUrl) : session.lanUrl;
   const [homeCode, setHomeCode] = useState('');
-  const [lanUrl, setLanUrl] = useState(session.lanUrl);
+  const [lanUrl, setLanUrl] = useState(impliedHub);
   const [outCode, setOutCode] = useState('');
   const [busy, setBusy] = useState<'home' | 'out' | ''>('');
   const [localError, setLocalError] = useState('');
-  const [discoverHint] = useState(session.lanUrl ? '将使用上次家里地址，未连家里 WiFi 请走出门。' : '');
+
+  useEffect(() => {
+    if (colocatedWeb) {
+      const url = pageHubUrl() || session.lanUrl;
+      if (url) setLanUrl(url);
+      return;
+    }
+    if (!canLanProbe()) return;
+    let cancelled = false;
+    const ctx = pageContext();
+    void discoverHub({
+      pageOrigin: ctx.origin,
+      pageHostname: ctx.hostname,
+      lastLanUrl: session.lanUrl,
+      includeLoopback: Platform.OS === 'web',
+    }).then((hit) => {
+      if (cancelled || !hit) return;
+      setLanUrl((cur) => cur || hit.url);
+    });
+    return () => { cancelled = true; };
+  }, [colocatedWeb, session.lanUrl]);
 
   function fail(err: unknown, fallback: string) {
     const raw = err instanceof Error ? err.message : fallback;
@@ -26,13 +51,13 @@ export function PairScreen({ onScan }: { onScan: () => void }) {
     setLocalError('');
     session.clearError();
     const code = homeCode.trim();
-    const url = lanUrl.trim() || session.lanUrl;
+    const url = (colocatedWeb ? (pageHubUrl() || lanUrl) : lanUrl.trim()) || session.lanUrl;
     if (!code) {
-      setLocalError('请输入主机台左边的家里码。');
+      setLocalError('请输入家里码');
       return;
     }
     if (!url) {
-      setLocalError('请填写电脑地址，主机台左边标「常用」的那个。');
+      setLocalError(colocatedWeb ? '无法连接' : '请填写电脑地址');
       return;
     }
     setBusy('home');
@@ -69,56 +94,84 @@ export function PairScreen({ onScan }: { onScan: () => void }) {
     <KeyboardAvoidingView style={[styles.root, { backgroundColor: colors.bg }]} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <ScrollView contentContainerStyle={styles.inner} keyboardShouldPersistTaps="handled">
         <Text style={[styles.brand, { color: colors.text }]}>Codesk</Text>
-        <Text style={[styles.lead, { color: colors.muted }]}>家里码和出门码不是同一个。看电脑主机台：左家里，右出门。</Text>
+        {colocatedWeb ? null : (
+          <Text style={[styles.lead, { color: colors.muted }]}>
+            家里码和出门码不是同一个。看电脑主机台：左家里，右出门。
+          </Text>
+        )}
         <ErrorBanner text={localError || session.error} onClose={() => { setLocalError(''); session.clearError(); }} />
 
-        <View style={[styles.card, card]}>
-          <Text style={[styles.cardTitle, { color: colors.text }]}>家里 WiFi</Text>
-          <Text style={[styles.cardHint, { color: colors.muted }]}>用主机台左边的 4 位家里码。同一局域网，不经中继。</Text>
-          {discoverHint ? <Text style={[styles.cardHint, { color: colors.text }]}>{discoverHint}</Text> : null}
-          <TextInput
-            value={homeCode}
-            onChangeText={(v) => setHomeCode(v.toUpperCase())}
-            autoCapitalize="characters"
-            autoCorrect={false}
-            placeholder="4 位家里码"
-            maxLength={4}
-            placeholderTextColor={colors.muted}
-            style={[styles.input, { backgroundColor: colors.shell, color: colors.text, borderColor: colors.line }]}
-            returnKeyType="next"
-          />
-          <TextInput
-            value={lanUrl}
-            onChangeText={setLanUrl}
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="url"
-            placeholder="http://192.168.x.x:18990"
-            placeholderTextColor={colors.muted}
-            style={[styles.url, { backgroundColor: colors.shell, color: colors.text, borderColor: colors.line }]}
-            returnKeyType="go"
-            onSubmitEditing={() => { void submitHome(); }}
-          />
-          <PrimaryButton label="连接家里" busy={busy === 'home'} disabled={!!busy} onPress={() => { void submitHome(); }} />
-        </View>
+        {loopbackWeb ? (
+          <Text style={[styles.cardHint, { color: colors.muted }]}>无法连接</Text>
+        ) : colocatedWeb ? (
+          <View style={[styles.card, card]}>
+            <Text style={[styles.cardTitle, { color: colors.text }]}>家里码</Text>
+            <TextInput
+              value={homeCode}
+              onChangeText={(v) => setHomeCode(v.toUpperCase())}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              placeholder="4 位家里码"
+              maxLength={4}
+              placeholderTextColor={colors.muted}
+              style={[styles.input, { backgroundColor: colors.shell, color: colors.text, borderColor: colors.line }]}
+              returnKeyType="go"
+              onSubmitEditing={() => { void submitHome(); }}
+            />
+            <PrimaryButton label="连接" busy={busy === 'home'} disabled={!!busy} onPress={() => { void submitHome(); }} />
+          </View>
+        ) : (
+          <View style={[styles.card, card]}>
+            <Text style={[styles.cardTitle, { color: colors.text }]}>家里 WiFi</Text>
+            <Text style={[styles.cardHint, { color: colors.muted }]}>用主机台左边的 4 位家里码。</Text>
+            <TextInput
+              value={homeCode}
+              onChangeText={(v) => setHomeCode(v.toUpperCase())}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              placeholder="4 位家里码"
+              maxLength={4}
+              placeholderTextColor={colors.muted}
+              style={[styles.input, { backgroundColor: colors.shell, color: colors.text, borderColor: colors.line }]}
+              returnKeyType="next"
+            />
+            {colocatedWeb ? null : (
+              <TextInput
+                value={lanUrl}
+                onChangeText={setLanUrl}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="url"
+                placeholder="http://192.168.x.x:18990"
+                placeholderTextColor={colors.muted}
+                style={[styles.url, { backgroundColor: colors.shell, color: colors.text, borderColor: colors.line }]}
+                returnKeyType="go"
+                onSubmitEditing={() => { void submitHome(); }}
+              />
+            )}
+            <PrimaryButton label="连接家里" busy={busy === 'home'} disabled={!!busy} onPress={() => { void submitHome(); }} />
+          </View>
+        )}
 
-        <View style={[styles.card, card]}>
-          <Text style={[styles.cardTitle, { color: colors.text }]}>出门</Text>
-          <Text style={[styles.cardHint, { color: colors.muted }]}>用主机台右边的一次性出门码。中继没连上就出不了这个码。</Text>
-          <TextInput
-            value={outCode}
-            onChangeText={(v) => setOutCode(v.toUpperCase())}
-            autoCapitalize="characters"
-            autoCorrect={false}
-            placeholder="出门码"
-            placeholderTextColor={colors.muted}
-            style={[styles.input, { backgroundColor: colors.shell, color: colors.text, borderColor: colors.line }]}
-            returnKeyType="go"
-            onSubmitEditing={() => { void submitOut(); }}
-          />
-          <PrimaryButton label="连接出门" busy={busy === 'out'} disabled={!!busy} onPress={() => { void submitOut(); }} />
-          {Platform.OS === 'web' ? null : <GhostButton label="扫描出门二维码" onPress={onScan} />}
-        </View>
+        {colocatedWeb ? null : (
+          <View style={[styles.card, card]}>
+            <Text style={[styles.cardTitle, { color: colors.text }]}>出门</Text>
+            <Text style={[styles.cardHint, { color: colors.muted }]}>用主机台右边的一次性出门码。中继没连上就出不了这个码。</Text>
+            <TextInput
+              value={outCode}
+              onChangeText={(v) => setOutCode(v.toUpperCase())}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              placeholder="出门码"
+              placeholderTextColor={colors.muted}
+              style={[styles.input, { backgroundColor: colors.shell, color: colors.text, borderColor: colors.line }]}
+              returnKeyType="go"
+              onSubmitEditing={() => { void submitOut(); }}
+            />
+            <PrimaryButton label="连接出门" busy={busy === 'out'} disabled={!!busy} onPress={() => { void submitOut(); }} />
+            {Platform.OS === 'web' ? null : <GhostButton label="扫描出门二维码" onPress={onScan} />}
+          </View>
+        )}
       </ScrollView>
     </KeyboardAvoidingView>
   );

@@ -31,24 +31,35 @@ writeThreadFixture(codexHome, { threadId, cwd: repo });
 
 const hub = await startHub({ CODEX_HOME: codexHome, ONEDESK_PASSWORD: 'lane-pass' });
 const headers = authHeader('lane-pass');
+const remote = { Origin: 'https://evil.example' };
 
 try {
-  const status = await (await fetch(`${hub.base}/api/auth/status`)).json();
+  const status = await (await fetch(`${hub.base}/api/auth/status`, { headers: remote })).json();
   record('status without login', status.loggedIn === false && Boolean(status.hubId), status.hubId);
 
-  const denied = await fetch(`${hub.base}/api/threads`);
+  const denied = await fetch(`${hub.base}/api/threads`, { headers: remote });
   record('threads denied without login', denied.status === 401);
 
-  const historyDenied = await fetch(`${hub.base}/api/thread-history?threadId=${threadId}`);
+  const forwardedDenied = await fetch(`${hub.base}/api/threads`, {
+    headers: { 'CF-Connecting-IP': '203.0.113.10' },
+  });
+  record('threads denied through cloudflare tunnel without login', forwardedDenied.status === 401);
+
+  const hostThroughTunnel = await fetch(`${hub.base}/api/host/status`, {
+    headers: { 'CF-Connecting-IP': '203.0.113.10', 'X-Forwarded-Proto': 'https' },
+  });
+  record('host console denied through cloudflare tunnel', hostThroughTunnel.status === 403);
+
+  const historyDenied = await fetch(`${hub.base}/api/thread-history?threadId=${threadId}`, { headers: remote });
   record('history denied without login', historyDenied.status === 401);
 
-  const uploadDenied = await fetch(`${hub.base}/api/upload?name=x.txt`, { method: 'POST', body: 'x' });
+  const uploadDenied = await fetch(`${hub.base}/api/upload?name=x.txt`, { method: 'POST', headers: remote, body: 'x' });
   record('upload denied without login', uploadDenied.status === 401);
 
   let wsDenied = false;
   try {
     await new Promise((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${hub.port}`);
+      const ws = new WebSocket(`ws://127.0.0.1:${hub.port}`, { headers: remote });
       ws.once('open', () => {
         ws.close();
         reject(new Error('opened'));
@@ -112,9 +123,64 @@ try {
   const setCookie = login.headers.get('set-cookie') || '';
   record('login sets Path=/ cookie', login.ok && loginJson.success && /Path=\//i.test(setCookie), setCookie.split(';')[0]);
 
+  fs.writeFileSync(path.join(codexHome, 'config.toml'), 'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "medium"\nservice_tier = "default"\n');
   const threads = await fetch(`${hub.base}/api/threads`, { headers });
   const threadJson = await threads.json();
   record('threads readable after login', threads.ok && Array.isArray(threadJson.data?.threads), String(threadJson.data?.threads?.length || 0));
+  record('config reports default speed', threadJson.config?.speed === 'default', threadJson.config?.speed);
+
+  const speedWs = await connectAuthedWs(hub);
+  const speedWait = waitForWs(speedWs, (msg) => msg.type === 'config_data', 8000);
+  speedWs.send(JSON.stringify({ type: 'update_config', key: 'speed', value: 'fast' }));
+  const speedMsg = await speedWait;
+  speedWs.close();
+  const toml = fs.readFileSync(path.join(codexHome, 'config.toml'), 'utf8');
+  record('speed writes service_tier', Boolean(speedMsg && /service_tier\s*=\s*"fast"/.test(toml)), toml.split('\n').find((l) => l.includes('service_tier')));
+
+  const pinRes = await fetch(`${hub.base}/api/threads/pin`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: threadId, kind: 'thread', pinned: true }),
+  });
+  const pinJson = await pinRes.json();
+  record('pin writes sidecar', pinRes.ok && pinJson.pinned === true && pinJson.id === threadId, pinJson.error || '');
+  const pinnedList = await (await fetch(`${hub.base}/api/threads`, { headers })).json();
+  const pinnedHit = (pinnedList.data?.threads || []).find((t) => t.id === threadId);
+  record('thread list reflects remote pin', Boolean(pinnedHit && pinnedHit.isPinned));
+  record('pins.jsonl created', fs.existsSync(path.join(codexHome, 'pins.jsonl')));
+
+  const archRes = await fetch(`${hub.base}/api/threads/archive`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: threadId, archived: true }),
+  });
+  const archJson = await archRes.json();
+  record('archive writes sidecar', archRes.ok && archJson.archived === true, archJson.error || '');
+  const afterArch = await (await fetch(`${hub.base}/api/threads`, { headers })).json();
+  record('archived thread hidden from list', !(afterArch.data?.threads || []).some((t) => t.id === threadId));
+
+  const unarchRes = await fetch(`${hub.base}/api/threads/archive`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: threadId, archived: false }),
+  });
+  const afterUnarch = await (await fetch(`${hub.base}/api/threads`, { headers })).json();
+  record('unarchive restores thread', unarchRes.ok && (afterUnarch.data?.threads || []).some((t) => t.id === threadId));
+
+  const shot = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  const shotPath = path.join(repo, 'shot.png');
+  fs.writeFileSync(shotPath, shot);
+  const rawDenied = await fetch(`${hub.base}/api/file?path=${encodeURIComponent(shotPath)}&raw=1`, {
+    headers: { 'CF-Connecting-IP': '203.0.113.10' },
+  });
+  record('raw image denied through tunnel without login', rawDenied.status === 401);
+  const rawOk = await fetch(`${hub.base}/api/file?path=${encodeURIComponent(shotPath)}&raw=1`, { headers });
+  const rawBuf = Buffer.from(await rawOk.arrayBuffer());
+  record(
+    'raw image served as bytes after login',
+    rawOk.ok && rawOk.headers.get('content-type') === 'image/png' && rawBuf.equals(shot),
+    rawOk.headers.get('content-type'),
+  );
 
   const ws = await connectAuthedWs(hub);
   const gitWait = waitForWs(ws, (msg) => msg.type === 'git_status' && msg.threadId === threadId, 10000);
@@ -135,7 +201,7 @@ try {
 
   const cookie = setCookie.split(';')[0];
   await fetch(`${hub.base}/api/auth/logout`, { method: 'POST', headers: { cookie } });
-  const afterLogout = await fetch(`${hub.base}/api/threads`, { headers: { cookie } });
+  const afterLogout = await fetch(`${hub.base}/api/threads`, { headers: { ...remote, cookie } });
   record('logout clears session', afterLogout.status === 401);
 } catch (err) {
   record('http suite crashed', false, err.message);

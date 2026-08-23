@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="codesk-bloom" x1="18" y1="8" x2="44" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D7C6FF"/>
+      <stop offset=".42" stop-color="#7B8CFF"/>
+      <stop offset="1" stop-color="#3B5BFF"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#codesk-bloom)" d="M32 6c5.2 0 8.8 3.4 10.2 7.4 4.2-.4 9.4 2.2 10.6 7.4 3.8 1.6 6.4 6.6 4.8 11.4 2.2 3.6 1.6 9.2-2.4 12.2.4 4.6-2.6 9.8-7.6 11-1.8 4.2-6.6 7.2-11.6 6.4-3 .4-6.6.4-9.6-.8-4.2 2.2-10.2.8-12.8-3.6-4.4.2-8.8-3.4-9.2-7.8-3.2-2-4.4-7-2.2-10.8-2.4-4 .2-9.6 4.6-11.6C8.2 19.4 12 14.8 17.6 14.2 19.4 9.6 25.2 6 32 6Z"/>
+  <path stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round" d="M26.2 36.6a6.4 6.4 0 0 1 0-9.1l3.4-3.4a6.4 6.4 0 0 1 9.1 9.1l-1.5 1.5M37.8 27.4a6.4 6.4 0 0 1 0 9.1l-3.4 3.4a6.4 6.4 0 1 1-9.1-9.1l1.5-1.5"/>
+  <circle cx="42.6" cy="38.8" r="2.1" fill="#E4D6FF"/>
+</svg>

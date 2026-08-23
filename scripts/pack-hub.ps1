@@ -1,6 +1,22 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $hubSrc = Join-Path $root "apps\web-hub"
+$mobileSrc = Join-Path $root "apps\mobile"
+$webSrc = Join-Path $mobileSrc "dist-web"
+$legacyWeb = Join-Path $root "apps\web"
+if (-not (Test-Path -LiteralPath (Join-Path $mobileSrc "node_modules"))) {
+  Push-Location $mobileSrc
+  try { npm install } finally { Pop-Location }
+}
+Push-Location $mobileSrc
+try { node scripts/export-web.mjs } finally { Pop-Location }
+if (-not (Test-Path -LiteralPath (Join-Path $webSrc "index.html"))) {
+  Write-Host "Expo Web 导出失败，回退旧 PWA"
+  $webSrc = $legacyWeb
+}
+if (-not (Test-Path -LiteralPath (Join-Path $webSrc "index.html"))) {
+  $webSrc = Join-Path $hubSrc "public"
+}
 $dist = Join-Path $root "dist"
 $work = "C:\Users\zhang\AppData\Local\Temp\opencode\codesk-pack"
 $stage = Join-Path $work "payload"
@@ -87,14 +103,14 @@ if (-not (Test-Path -LiteralPath $dist)) { New-Item -ItemType Directory -Path $d
 
 Copy-Item -LiteralPath (Join-Path $hubSrc "package.json") -Destination (Join-Path $stage "hub\package.json")
 Copy-Item -LiteralPath (Join-Path $hubSrc "server") -Destination (Join-Path $stage "hub\server") -Recurse
-Copy-Item -LiteralPath (Join-Path $hubSrc "public") -Destination (Join-Path $stage "hub\public") -Recurse
+Copy-Item -LiteralPath $webSrc -Destination (Join-Path $stage "hub\public") -Recurse
 robocopy (Join-Path $hubSrc "node_modules") (Join-Path $stage "hub\node_modules") /E /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "复制 node_modules 失败" }
 Copy-Item -LiteralPath $nodeSrc -Destination (Join-Path $stage "node\node.exe")
 
 $hubExe = Join-Path $stage "CodeskHub.exe"
 $hubCs = Join-Path $PSScriptRoot "CodeskHub.cs"
-$png = Join-Path $hubSrc "public\favicon-192.png"
+$png = Join-Path $webSrc "favicon-192.png"
 $ico = Join-Path $work "codesk.ico"
 ConvertTo-BmpIco -PngPath $png -IcoPath $ico
 Copy-Item -LiteralPath $ico -Destination (Join-Path $stage "favicon.ico") -Force

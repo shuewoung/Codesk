@@ -1,7 +1,7 @@
 {
-  "version": "1.0.10",
-  "versionCode": 110,
-  "releaseDate": "2026-08-21",
-  "changelog": "1. 推送通知可直达对应会话\n2. 对话流、文件预览与会话列表对齐主机台\n3. 优化审批、终端命令折叠与连接状态",
+  "version": "1.0.11",
+  "versionCode": 111,
+  "releaseDate": "2026-08-23",
+  "changelog": "1. 修复长对话中消息列表偶发崩溃的问题\n2. 打字与流式输出渲染大幅提速，长会话更流畅\n3. 历史消息分批加载，向上翻更稳\n4. 文件缓存加上限，久用内存更稳\n5. APK 体积与启动速度优化",
   "downloadUrl": "https://codesk.icu/codesk-latest.apk"
 }

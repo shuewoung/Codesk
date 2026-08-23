@@ -1,9 +1,15 @@
+import * as Clipboard from 'expo-clipboard';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { useSession } from '../session';
+import { Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { formatContextUsage, formatQuotaLine } from '../quota';
+import { useHistories, useSession, useTools, useWorkspace } from '../session';
 import { radius, space } from '../theme';
 import { useTheme } from '../theme-context';
 import type { TreeNode } from '../types';
+
+const webNoOutline = Platform.OS === 'web'
+  ? ({ outlineWidth: 0, outlineStyle: 'none' as any } as any)
+  : null;
 
 function collectDirs(nodes: TreeNode[], out: string[] = []): string[] {
   for (const n of nodes) {
@@ -37,29 +43,48 @@ function filterTree(nodes: TreeNode[], q: string): TreeNode[] {
 export function FilePanel({
   threadId,
   onOpenFile,
+  onOpenThread,
 }: {
   threadId?: string;
   onOpenFile: (path: string) => void;
+  onOpenThread?: (id: string) => void;
 }) {
   const session = useSession();
+  const { histories, openThread } = useHistories();
+  const tools = useTools();
+  const workspace = useWorkspace();
   const { colors } = useTheme();
-  const history = threadId ? session.histories[threadId] : undefined;
+  const history = threadId ? histories[threadId] : undefined;
   const cwd = history?.cwd || session.projects[0]?.cwd || '';
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [filterQ, setFilterQ] = useState('');
+  const [filterFocused, setFilterFocused] = useState(false);
+  const [tab, setTab] = useState<'files' | 'git'>('files');
+  const [cmd, setCmd] = useState('');
+  const [copied, setCopied] = useState('');
 
   useEffect(() => {
-    if (threadId) session.requestTree(threadId, cwd);
+    if (threadId) {
+      workspace.requestTree(threadId, cwd);
+      workspace.listArtifacts(threadId, cwd);
+    }
   }, [threadId, cwd]);
 
-  const displayedTree = useMemo(() => filterTree(session.tree.tree, filterQ.trim()), [session.tree.tree, filterQ]);
+  useEffect(() => {
+    const q = filterQ.trim();
+    if (!threadId || q.length < 2) return;
+    const timer = setTimeout(() => workspace.searchWorkspace(threadId, cwd, q), 220);
+    return () => clearTimeout(timer);
+  }, [filterQ, threadId, cwd]);
+
+  const displayedTree = useMemo(() => filterTree(workspace.tree.tree, filterQ.trim()), [workspace.tree.tree, filterQ]);
   const dirs = useMemo(() => collectDirs(displayedTree), [displayedTree]);
 
   useEffect(() => {
     const next: Record<string, boolean> = {};
     for (const d of dirs) next[d] = true;
     setOpen(next);
-  }, [session.tree.cwd, dirs.length, filterQ]);
+  }, [workspace.tree.cwd, dirs, filterQ]);
 
   const accountLeft = session.quota.primaryUsedPercent != null
     ? Math.max(0, 100 - session.quota.primaryUsedPercent)
@@ -70,51 +95,240 @@ export function FilePanel({
       ? Math.max(0, 100 - history.tokenUsage.primaryUsedPercent)
       : accountLeft;
 
+  async function copyPath(path: string) {
+    const next = String(path || '').trim();
+    if (!next) return;
+    await Clipboard.setStringAsync(next);
+    setCopied(next);
+    setTimeout(() => setCopied(''), 1600);
+  }
+
   return (
-    <View style={[styles.root, { backgroundColor: colors.bg }]}>
-      <Text style={[styles.head, { color: colors.text }]}>文件</Text>
-      <Text style={[styles.cwd, { color: colors.muted }]} numberOfLines={2}>
-        {session.tree.rootName || cwd || '当前工作目录'}
-      </Text>
+    <View style={[styles.root, { backgroundColor: colors.shell }]}>
+      <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: space.md, paddingTop: 10 }}>
+        {(['files', 'git'] as const).map((id) => (
+          <Pressable key={id} onPress={() => setTab(id)} hitSlop={6}>
+            <Text style={{ color: tab === id ? colors.text : colors.muted, fontSize: 13, fontWeight: tab === id ? '700' : '500' }}>
+              {id === 'files' ? '文件' : 'Git / 命令'}
+            </Text>
+          </Pressable>
+        ))}
+      </View>
+      <Pressable onLongPress={() => { void copyPath(workspace.tree.cwd || cwd); }}>
+        <Text style={[styles.cwd, { color: colors.muted }]} numberOfLines={2}>
+          {workspace.tree.rootName || cwd || '当前工作目录'}
+          {copied && (copied === (workspace.tree.cwd || cwd)) ? '  · 已复制' : ''}
+        </Text>
+      </Pressable>
+      {tab === 'git' ? (
+        <View style={{ flex: 1, paddingHorizontal: space.md, gap: 8 }}>
+          <Pressable
+            onPress={() => { if (threadId) tools.gitStatus(threadId); }}
+            style={[styles.chip, { backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth, alignSelf: 'flex-start' }]}
+          >
+            <Text style={{ color: colors.text, fontSize: 13 }}>刷新 Git</Text>
+          </Pressable>
+          <ScrollView style={{ flex: 1 }}>
+            {tools.git?.error ? (
+              <Text selectable style={{ color: '#ef4444', fontSize: 12, lineHeight: 18 }}>{tools.git.error}</Text>
+            ) : (tools.git?.files && tools.git.files.length) ? (
+              tools.git.files.map((file) => (
+                <Pressable
+                  key={file.path}
+                  onPress={() => onOpenFile(file.path)}
+                  style={[styles.chip, { backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth, marginBottom: 6, alignSelf: 'stretch' }]}
+                >
+                  <Text style={{ color: colors.text, fontSize: 13 }} numberOfLines={1}>{file.path}</Text>
+                  <Text style={{ color: colors.muted, fontSize: 11 }}>{file.status || '改动'}  +{file.add || 0}/-{file.del || 0}</Text>
+                </Pressable>
+              ))
+            ) : (
+              <Text selectable style={{ color: colors.muted, fontSize: 12, lineHeight: 18 }}>
+                {tools.git?.status || '打开会话后点刷新。'}
+              </Text>
+            )}
+            {tools.git?.log ? (
+              <Text selectable style={{ color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 8 }}>
+                {tools.git.log.slice(0, 1500)}
+              </Text>
+            ) : null}
+          </ScrollView>
+          <View style={{ flexDirection: 'row', gap: 8, paddingBottom: 8 }}>
+            <TextInput
+              value={cmd}
+              onChangeText={setCmd}
+              placeholder="$ 在会话目录跑一条命令"
+              placeholderTextColor={colors.muted}
+              style={[
+                styles.searchInput,
+                { flex: 1, backgroundColor: colors.bg, color: colors.text, borderColor: colors.line, borderWidth: 1 },
+                webNoOutline,
+              ]}
+              onSubmitEditing={() => {
+                const next = cmd.trim().replace(/^\$\s*/, '');
+                if (threadId && next) {
+                  tools.runCommand(threadId, next);
+                  setCmd('');
+                }
+              }}
+            />
+            <Pressable
+              onPress={() => { if (threadId) tools.stopCommand(threadId); }}
+              style={[styles.chip, { backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth }]}
+            >
+              <Text style={{ color: colors.text, fontSize: 13 }}>停</Text>
+            </Pressable>
+          </View>
+          {tools.commandHist.length ? (
+            <ScrollView horizontal style={{ maxHeight: 36 }}>
+              {tools.commandHist.map((row) => (
+                <Pressable
+                  key={row.command}
+                  onPress={() => {
+                    if (threadId) tools.runCommand(threadId, row.command);
+                  }}
+                  style={[styles.chip, { marginRight: 6, backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth }]}
+                >
+                  <Text style={{ color: colors.muted, fontSize: 11 }}>{row.command.slice(0, 24)}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          ) : null}
+          {tools.commandOut ? (
+            <ScrollView style={{ maxHeight: 140, marginBottom: 8 }}>
+              <Text selectable style={{ color: colors.muted, fontSize: 11, lineHeight: 16 }}>{tools.commandOut.slice(-4000)}</Text>
+            </ScrollView>
+          ) : null}
+        </View>
+      ) : null}
+      {tab !== 'files' ? null : (
+      <View style={{ flex: 1 }}>
       <View style={{ paddingHorizontal: space.md, paddingBottom: 8 }}>
         <TextInput
           value={filterQ}
           onChangeText={setFilterQ}
-          placeholder="🔍 筛选文件..."
+          onFocus={() => setFilterFocused(true)}
+          onBlur={() => setFilterFocused(false)}
+          placeholder="🔍 搜索整个项目..."
           placeholderTextColor={colors.muted}
-          style={[styles.searchInput, { backgroundColor: colors.shell, color: colors.text, borderColor: colors.line }]}
+          style={[
+            styles.searchInput,
+            {
+              backgroundColor: colors.bg,
+              color: colors.text,
+              borderColor: filterFocused ? colors.text : colors.line,
+              borderWidth: 1,
+            },
+            webNoOutline,
+          ]}
         />
       </View>
       <View style={styles.actions}>
-        <Pressable style={[styles.chip, { backgroundColor: colors.shell }]} onPress={() => {
-          const next: Record<string, boolean> = {};
-          for (const d of dirs) next[d] = true;
-          setOpen(next);
-        }}>
+        <Pressable
+          style={[styles.chip, { backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth }]}
+          onPress={() => {
+            const next: Record<string, boolean> = {};
+            for (const d of dirs) next[d] = true;
+            setOpen(next);
+          }}
+        >
           <Text style={{ color: colors.text, fontSize: 13 }}>全部展开</Text>
         </Pressable>
-        <Pressable style={[styles.chip, { backgroundColor: colors.shell }]} onPress={() => setOpen({})}>
+        <Pressable
+          style={[styles.chip, { backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth }]}
+          onPress={() => setOpen({})}
+        >
           <Text style={{ color: colors.text, fontSize: 13 }}>全部折叠</Text>
         </Pressable>
       </View>
       <ScrollView contentContainerStyle={styles.list}>
+        {filterQ.trim().length >= 2 && workspace.workspaceHits.length ? (
+          workspace.workspaceHits.map((hit) => (
+            <Pressable
+              key={hit.path}
+              onPress={() => onOpenFile(hit.path)}
+              onLongPress={() => session.queueMention(hit.path)}
+              style={[styles.treeFileRow, { paddingLeft: 10 }]}
+            >
+              <Text style={[styles.treeFileName, { color: colors.text }]} numberOfLines={1}>{hit.name}</Text>
+              <Pressable onPress={() => session.queueMention(hit.path)} hitSlop={8}>
+                <Text style={{ color: colors.muted, fontSize: 12 }}>@</Text>
+              </Pressable>
+            </Pressable>
+          ))
+        ) : null}
+        {workspace.artifacts.length ? (
+          <View style={{ paddingHorizontal: 4, paddingBottom: 8 }}>
+            <Text style={{ color: colors.muted, fontSize: 12, marginBottom: 6 }}>产物</Text>
+            {workspace.artifacts.slice(0, 8).map((file) => (
+              <Pressable key={file.path} onPress={() => onOpenFile(file.path)} style={{ paddingVertical: 4 }}>
+                <Text style={{ color: colors.text, fontSize: 13 }}>{file.name}</Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+        {(history?.subagents || []).map((agent) => (
+          <Pressable
+            key={agent.id}
+            onPress={() => {
+              openThread(agent.id);
+              onOpenThread?.(agent.id);
+            }}
+            style={{ paddingVertical: 6 }}
+          >
+            <Text style={{ color: colors.text, fontSize: 13 }}>
+              {agent.status === 'working' || agent.status === 'desktop' ? '🟢 ' : '○ '}{agent.title || agent.id.slice(0, 8)}
+            </Text>
+          </Pressable>
+        ))}
         {displayedTree.map((node) => (
           <TreeRow
             key={node.path}
             node={node}
             depth={0}
             open={open}
-            onToggle={(p) => setOpen((prev) => ({ ...prev, [p]: !prev[p] }))}
+            onToggle={(p) => {
+              setOpen((prev) => ({ ...prev, [p]: !prev[p] }));
+              const find = (nodes: TreeNode[]): TreeNode | null => {
+                for (const n of nodes) {
+                  if (n.path === p) return n;
+                  if (n.children) {
+                    const hit = find(n.children);
+                    if (hit) return hit;
+                  }
+                }
+                return null;
+              };
+              const node = find(workspace.tree.tree);
+              if (threadId && node?.type === 'directory' && !(node.children && node.children.length) && node.hasChildren !== false) {
+                workspace.requestTree(threadId, workspace.tree.cwd || cwd, p);
+              }
+            }}
             onOpenFile={onOpenFile}
+            onMention={(p) => session.queueMention(p)}
+            onCopyPath={(p) => { void copyPath(p); }}
           />
         ))}
         {!displayedTree.length ? (
           <Text style={{ color: colors.muted, padding: space.md }}>没有可显示的文件</Text>
         ) : null}
       </ScrollView>
+      </View>
+      )}
       <View style={[styles.bars, { borderTopColor: colors.line }]}>
-        <UsageBar label="账号剩余" value={accountLeft} color={colors.ok} track={colors.shell} text={colors.muted} />
-        <UsageBar label="上下文剩余" value={ctxLeft} color={colors.warn} track={colors.shell} text={colors.muted} />
+        <UsageBar label="账号剩余" value={accountLeft} color={colors.ok} track={colors.card} text={colors.muted} />
+        <UsageBar label="上下文剩余" value={ctxLeft} color={colors.warn} track={colors.card} text={colors.muted} />
+        {formatQuotaLine(session.quota) ? (
+          <Text style={{ color: colors.muted, fontSize: 11 }}>{formatQuotaLine(session.quota)}</Text>
+        ) : null}
+        {formatContextUsage(history?.tokenUsage) ? (
+          <Text style={{ color: colors.muted, fontSize: 11 }}>{formatContextUsage(history?.tokenUsage)}</Text>
+        ) : null}
+        {(history?.tokenUsage?.sources || []).map((src) => (
+          <Text key={src.label} style={{ color: colors.muted, fontSize: 11 }}>
+            {src.label} {Math.round(src.percent)}%
+          </Text>
+        ))}
       </View>
     </View>
   );
@@ -218,12 +432,16 @@ function TreeRow({
   open,
   onToggle,
   onOpenFile,
+  onMention,
+  onCopyPath,
 }: {
   node: TreeNode;
   depth: number;
   open: Record<string, boolean>;
   onToggle: (path: string) => void;
   onOpenFile: (path: string) => void;
+  onMention?: (path: string) => void;
+  onCopyPath: (path: string) => void;
 }) {
   const { colors } = useTheme();
   if (node.type === 'directory') {
@@ -232,10 +450,12 @@ function TreeRow({
       <View>
         <Pressable
           onPress={() => onToggle(node.path)}
+          onLongPress={() => onCopyPath(node.path)}
+          delayLongPress={420}
           style={({ pressed }) => [
             styles.treeDirRow,
             { paddingLeft: 10 + depth * 14 },
-            pressed && { backgroundColor: colors.shell },
+            pressed && { backgroundColor: colors.card },
           ]}
         >
           <Text style={[styles.treeChevron, { color: colors.muted }]}>
@@ -254,6 +474,8 @@ function TreeRow({
                 open={open}
                 onToggle={onToggle}
                 onOpenFile={onOpenFile}
+                onMention={onMention}
+                onCopyPath={onCopyPath}
               />
             ))
           : null}
@@ -263,16 +485,21 @@ function TreeRow({
   return (
     <Pressable
       onPress={() => onOpenFile(node.path)}
+      onLongPress={() => onCopyPath(node.path)}
+      delayLongPress={420}
       style={({ pressed }) => [
         styles.treeFileRow,
         { paddingLeft: 24 + depth * 14 },
-        pressed && { backgroundColor: colors.shell },
+        pressed && { backgroundColor: colors.card },
       ]}
     >
       <FileIconView name={node.name} />
-      <Text style={[styles.treeFileName, { color: colors.text }]} numberOfLines={1}>
+      <Text style={[styles.treeFileName, { color: colors.text, flex: 1 }]} numberOfLines={1}>
         {node.name}
       </Text>
+      <Pressable onPress={() => onMention?.(node.path)} hitSlop={8}>
+        <Text style={{ color: colors.muted, fontSize: 12 }}>@</Text>
+      </Pressable>
     </Pressable>
   );
 }

@@ -2,7 +2,7 @@
   "expo": {
     "name": "Codesk",
     "slug": "codesk",
-    "version": "1.0.10",
+    "version": "1.0.11",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -29,11 +29,14 @@
     },
     "android": {
       "package": "icu.codesk.hub",
-      "versionCode": 1,
+      "versionCode": 111,
       "usesCleartextTraffic": true,
       "permissions": [
         "android.permission.INTERNET",
-        "android.permission.ACCESS_NETWORK_STATE"
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.VIBRATE"
       ],
       "softwareKeyboardLayoutMode": "pan",
       "adaptiveIcon": {

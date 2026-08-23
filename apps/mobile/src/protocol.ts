@@ -55,13 +55,13 @@ export function normalizeRelayUrl(raw: string): string {
   return `${looksLikePlainHttp(trimmed) ? 'http' : 'https'}://${trimmed}`;
 }
 
-export function toWsUrl(relayUrl: string, token?: string): string {
+export function toWsUrl(relayUrl: string, token?: string, pathname = '/'): string {
   const http = normalizeRelayUrl(relayUrl);
   if (!http) return '';
   const ws = http.replace(/^http/i, 'ws');
-  if (!token) return ws;
   const url = new URL(ws);
-  url.searchParams.set('token', token);
+  url.pathname = pathname || '/';
+  if (token) url.searchParams.set('token', token);
   return url.toString();
 }
 

@@ -4,9 +4,9 @@
 
 ## 产品壳
 
-- 以后只维护 **Expo**（`apps/mobile`）。旧 PWA（`apps/web-hub/public/`）不删、不搬进 RN。
-- 开发 Web：`cd apps/mobile && npx expo start --web` → `http://localhost:8081`（这是 Expo UI，不是 Hub `:18990` 旧 PWA）。
-- 出门客户端要装 **新 APK**。已上架/已安装的包仍是旧提交：会提示 `http://`、没有家里探测、Android 上 `no PRNG`。
+- 日常电脑 UI：**Expo Web `:18991`**（`cd apps/mobile && npx expo start --web --port 18991`）。Hub `:18990` 探测到 18991 会把 `/` 302 过去。没有 Metro 时托管 `apps/mobile/dist-web`，再没有才回退 `apps/web`。
+- 旧 PWA（`apps/web/`、`apps/web-hub/public/`）不删，仍可由 Hub `:18990` 托管；**不再更新**。新交互只改 Expo。
+- 出门客户端要装 **含 E2E + 极光占位符的新 APK**。旧包：会提示 `http://`、没有家里探测、Android 上 `no PRNG`、收不到极光。
 
 ## 两套码（禁止混用）
 
@@ -41,7 +41,7 @@
 
 - Web 依赖：`react-dom` / `react-native-web` / `@expo/metro-runtime`（SDK 54）。
 - 存储：SecureStore，Web 不行就 `localStorage`。
-- Web 隐藏相机扫码；Web / Expo Go 推送 no-op。正式 APK 会 `register_push`。
+- Web 隐藏相机扫码；Web / Expo Go 推送 no-op。`android/` 已含 `JPUSH_APPKEY` 与通知权限，正式 APK 连上 Hub 后 `register_push`。
 - 家里：HTTP 探测 `GET /api/discover`（不扫 1–254）。顺序：当前页 `:18990` → 上次 `lanUrl` → `127.0.0.1`/`localhost`（仅 Web）→ 页面 hostname:18990 → 同网段 `.1`/`.2`。
 - 出门默认 `https://hub.codesk.icu:8787`。`normalizeRelayUrl` 会把旧 `http://hub.codesk.icu…` 改成 https。
 - Android `tweetnacl` 必须先 `expo-crypto` `setPRNG`，否则握手报 `no PRNG`。

@@ -39,16 +39,39 @@ export function emptyHistory(): ThreadHistory {
   };
 }
 
+const LIVE_HISTORY_WINDOW = 250;
+
 export function mergeHistory(prev: ThreadHistory | undefined, data: unknown): ThreadHistory {
   const incoming = data && typeof data === 'object' ? (data as Record<string, unknown>) : {};
   const delta = incoming.delta && typeof incoming.delta === 'object'
     ? (incoming.delta as { newItems?: HistoryItem[]; baseRev?: number })
     : null;
   const nextItems = Array.isArray(incoming.items) ? (incoming.items as HistoryItem[]) : [];
-  const mergedItems =
-    delta?.newItems && prev?.items && prev.rev !== undefined && prev.rev === delta.baseRev
-      ? prev.items.concat(delta.newItems).slice(-250)
-      : nextItems;
+  const incomingFull = incoming.full === true;
+  const prevFull = Boolean(prev?.full);
+  const deltaApplies = Boolean(
+    delta?.newItems && prev?.items && prev.rev !== undefined && prev.rev === delta.baseRev,
+  );
+
+  let mergedItems: HistoryItem[];
+  let full = prevFull;
+  if (deltaApplies) {
+    const combined = prev!.items.concat(delta!.newItems!);
+    full = prevFull || incomingFull;
+    mergedItems = full ? combined : combined.slice(-LIVE_HISTORY_WINDOW);
+  } else if (incomingFull) {
+    mergedItems = nextItems;
+    full = true;
+  } else if (prev?.items?.length && nextItems.length && nextItems.length < prev.items.length) {
+    mergedItems = prev.items;
+    full = prevFull;
+  } else if (!nextItems.length && prev?.items?.length) {
+    mergedItems = prev.items;
+    full = prevFull;
+  } else {
+    mergedItems = nextItems;
+    full = incomingFull;
+  }
 
   return {
     items: mergedItems,
@@ -64,6 +87,14 @@ export function mergeHistory(prev: ThreadHistory | undefined, data: unknown): Th
         ? incoming.activeActionText
         : prev?.activeActionText || '',
     cwd: typeof incoming.cwd === 'string' ? incoming.cwd : prev?.cwd || '',
+    lockHolder: incoming.lockHolder === 'desktop' || incoming.lockHolder === 'hub'
+      ? incoming.lockHolder
+      : incoming.lockHolder === null
+        ? null
+        : prev?.lockHolder ?? null,
+    subagents: Array.isArray(incoming.subagents)
+      ? incoming.subagents as ThreadHistory['subagents']
+      : prev?.subagents,
     tokenUsage:
       incoming.tokenUsage && typeof incoming.tokenUsage === 'object'
         ? (incoming.tokenUsage as ThreadHistory['tokenUsage'])
@@ -71,6 +102,7 @@ export function mergeHistory(prev: ThreadHistory | undefined, data: unknown): Th
     rev: typeof incoming.rev === 'number' ? incoming.rev : prev?.rev,
     totalItems: typeof incoming.totalItems === 'number' ? incoming.totalItems : prev?.totalItems,
     hasMore: typeof incoming.hasMore === 'boolean' ? incoming.hasMore : prev?.hasMore,
+    full,
   };
 }
 
@@ -92,24 +124,54 @@ function itemText(item: HistoryItem): string {
   return '';
 }
 
+function reasoningItemText(item: HistoryItem): string {
+  const s = item.summary ?? item.content ?? item.text;
+  if (typeof s === 'string') return cleanVisibleText(s);
+  if (Array.isArray(s)) {
+    return cleanVisibleText(
+      s.map((part) => {
+        if (typeof part === 'string') return part;
+        if (!part || typeof part !== 'object') return '';
+        const rec = part as { text?: string; content?: string };
+        return rec.text || rec.content || '';
+      }).filter(Boolean).join('\n'),
+    );
+  }
+  if (s && typeof s === 'object') {
+    const rec = s as { text?: string; content?: string };
+    return cleanVisibleText(rec.text || rec.content || '');
+  }
+  return '';
+}
+
 const SKIP_BLOCKS =
   /<(app-context|recommended_plugins|multi_agent_mode|user_instructions|environment_context|system-reminder|system_reminder|oai-mem-citation)(?:\s[^>]*)?>[\s\S]*?<\/\1>/gi;
 
+// 流式更新每次都会重跑 flattenItems，同一段文本会被反复清洗；
+// 按原文缓存清洗结果，超出上限整体清空（简单且足够）。
+const cleanTextCache = new Map<string, string>();
+const CLEAN_TEXT_CACHE_MAX = 500;
+
 function cleanVisibleText(raw: string): string {
-  let text = String(raw || '').replace(/\r\n/g, '\n');
+  const key = String(raw || '');
+  if (!key) return '';
+  const cached = cleanTextCache.get(key);
+  if (cached !== undefined) return cached;
+  let text = key.replace(/\r\n/g, '\n');
   text = text.replace(SKIP_BLOCKS, '');
   text = text.replace(/<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>/gi, '');
   text = text.replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, '');
   text = text.replace(/\n{3,}/g, '\n\n').trim();
-  if (!text) return '';
-  if ((text.startsWith('{') || text.startsWith('[')) && text.length > 80) {
+  if (text && (text.startsWith('{') || text.startsWith('[')) && text.length > 80) {
     try {
       JSON.parse(text);
-      return '';
+      text = '';
     } catch {
       /* keep */
     }
   }
+  if (cleanTextCache.size >= CLEAN_TEXT_CACHE_MAX) cleanTextCache.clear();
+  cleanTextCache.set(key, text);
   return text;
 }
 
@@ -162,20 +224,54 @@ export function extractActualCommand(raw: unknown): string {
   return str;
 }
 
+function cleanAgentName(name: string): string {
+  let clean = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!clean || clean === '子智能体' || clean === 'agent' || clean.toLowerCase() === 'main writer' || /^[a-f0-9-]{24,}$/i.test(clean)) {
+    return '子智能体';
+  }
+  clean = clean.split(/[\\/]/).pop() || clean;
+  return clean.replace(/_/g, ' ').trim();
+}
+
+function hashString(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i);
+    hash |= 0;
+  }
+  return hash;
+}
+
+function getItemStableId(item: HistoryItem, fallbackType: string, index: number): string {
+  if (item && typeof item.id === 'string' && item.id.trim()) return item.id.trim();
+  if (item && typeof item.call_id === 'string' && item.call_id.trim()) return item.call_id.trim();
+  const ts = item?.timestamp || item?.created_at || (item as Record<string, unknown>)?.turn || '';
+  const textSample = itemText(item).slice(0, 40);
+  const h = Math.abs(hashString(`${fallbackType}_${ts}_${textSample}`));
+  return `${fallbackType}-${h || index}`;
+}
+
 export function flattenItems(items: HistoryItem[]): TimelineNode[] {
   const out: TimelineNode[] = [];
-  let n = 0;
   const skipTypes = new Set([
-    'reasoning',
-    'agent_reasoning',
     'token_count',
     'function_call_output',
     'custom_tool_call_output',
     'tool_call_output',
   ]);
+  let idx = 0;
   for (const item of items || []) {
+    idx++;
     const type = item.type || '';
     if (skipTypes.has(type)) continue;
+    if (type === 'reasoning' || type === 'agent_reasoning') {
+      const text = reasoningItemText(item);
+      if (!text) continue;
+      const last = out[out.length - 1];
+      if (last && last.kind === 'reasoning') last.text = `${last.text}\n\n${text}`;
+      else out.push({ id: getItemStableId(item, 'reasoning', idx), kind: 'reasoning', text });
+      continue;
+    }
     if (type === 'message') {
       const role = item.role || 'assistant';
       if (role === 'developer') continue;
@@ -194,29 +290,43 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
           if (completedText && typeof completedText === 'string') {
             const last = out[out.length - 1];
             if (last && last.kind === 'assistant') last.text = `${last.text}\n\n${completedText}`;
-            else out.push({ id: `assistant-${n++}`, kind: 'assistant', text: completedText });
+            else out.push({ id: getItemStableId(item, 'assistant', idx), kind: 'assistant', text: completedText });
           }
           continue;
         }
-        out.push({ id: `user-${n++}`, kind: 'user', text });
+        out.push({ id: getItemStableId(item, 'user', idx), kind: 'user', text });
       } else {
         const last = out[out.length - 1];
         if (last && last.kind === 'assistant') last.text = `${last.text}\n\n${text}`;
-        else out.push({ id: `assistant-${n++}`, kind: 'assistant', text });
+        else out.push({ id: getItemStableId(item, 'assistant', idx), kind: 'assistant', text });
       }
       continue;
     }
     if (type === 'agent_message') {
-      const name = String(item.author || item.recipient || '子智能体').replace(/\s+/g, ' ').trim();
+      const author = item.author ? String(item.author).trim() : '';
+      const recipient = item.recipient ? String(item.recipient).trim() : '';
+      // 仅当明确存在子智能体身份时才作为子智能体动态节点
+      if (!author && !recipient) {
+        const text = cleanVisibleText(itemText(item));
+        if (text) {
+          const last = out[out.length - 1];
+          if (last && last.kind === 'assistant') last.text = `${last.text}\n\n${text}`;
+          else out.push({ id: getItemStableId(item, 'assistant', idx), kind: 'assistant', text });
+        }
+        continue;
+      }
+      const rawName = author || recipient;
+      const name = cleanAgentName(rawName);
+      const text = name === '子智能体' ? '子智能体已更新' : `子智能体「${name}」已更新`;
       out.push({
-        id: `agent-${n++}`,
-        kind: 'system',
-        text: name ? `🤖 ${name} 已更新` : '🤖 子智能体已更新',
+        id: getItemStableId(item, 'agent', idx),
+        kind: 'agent',
+        text,
       });
       continue;
     }
     if (type === 'context_compression' || type === 'auto_compressed') {
-      out.push({ id: `zip-${n++}`, kind: 'system', text: '上下文已自动压缩' });
+      out.push({ id: getItemStableId(item, 'zip', idx), kind: 'system', text: '上下文已自动压缩' });
       continue;
     }
     const args = parseArgs(item);
@@ -231,11 +341,11 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
 
     // Multi-agent spawn / close / wait detection
     if (toolName.includes('spawn_agent') || rawCmd.includes('spawn_agent')) {
-      out.push({ id: `agent-spawn-${n++}`, kind: 'system', text: '已创建 1 个智能体' });
+      out.push({ id: getItemStableId(item, 'agent-spawn', idx), kind: 'system', text: '已创建 1 个智能体' });
       continue;
     }
     if (toolName.includes('close_agent') || rawCmd.includes('close_agent')) {
-      out.push({ id: `agent-close-${n++}`, kind: 'system', text: '已关闭 1 个智能体' });
+      out.push({ id: getItemStableId(item, 'agent-close', idx), kind: 'system', text: '已关闭 1 个智能体' });
       continue;
     }
     if (toolName.includes('wait_agent') || rawCmd.includes('wait_agent') || toolName === 'wait') {
@@ -248,7 +358,7 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
         const captured = m[0].includes('short-drama-factory') ? 'Short Drama Factory' : m[1];
         if (captured && captured.toLowerCase() !== 'skill') skillName = captured;
       }
-      out.push({ id: `skill-${n++}`, kind: 'system', text: skillName ? `已读取 ${skillName} 技能` : '已读取技能' });
+      out.push({ id: getItemStableId(item, 'skill', idx), kind: 'system', text: skillName ? `已读取 ${skillName} 技能` : '已读取技能' });
       continue;
     }
 
@@ -263,7 +373,7 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
       const path = String(item.path || args?.path || args?.file || stats.path || '');
       const fileName = path.split(/[\\/]/).filter(Boolean).pop() || '文件';
       out.push({
-        id: `diff-${n++}`,
+        id: getItemStableId(item, 'diff', idx),
         kind: 'diff',
         text: fileName,
         path,
@@ -282,7 +392,7 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
       if (firstLine.length > 70) firstLine = firstLine.slice(0, 67) + '...';
       const label = firstLine ? `exec ${firstLine}` : '运行了命令';
       out.push({
-        id: `cmd-${n++}`,
+        id: getItemStableId(item, 'cmd', idx),
         kind: 'command',
         text: label,
       });
@@ -338,21 +448,36 @@ export type CommandGroup = {
   commands: TimelineNode[];
 };
 
-export type FeedNode = TimelineNode | CommandGroup;
+export type AgentGroup = {
+  kind: 'agent-group';
+  id: string;
+  agents: TimelineNode[];
+};
+
+export type FeedNode = TimelineNode | CommandGroup | AgentGroup;
 
 export function groupCommandNodes(nodes: TimelineNode[]): FeedNode[] {
   const out: FeedNode[] = [];
   for (const n of nodes) {
-    if (n.kind !== 'command') {
-      out.push(n);
+    if (n.kind === 'command') {
+      const last = out[out.length - 1];
+      if (last && last.kind === 'cmd-group') {
+        last.commands.push(n);
+      } else {
+        out.push({ kind: 'cmd-group', id: `g-${n.id}`, commands: [n] });
+      }
       continue;
     }
-    const last = out[out.length - 1];
-    if (last && last.kind === 'cmd-group') {
-      last.commands.push(n);
-    } else {
-      out.push({ kind: 'cmd-group', id: `g-${n.id}`, commands: [n] });
+    if (n.kind === 'agent') {
+      const last = out[out.length - 1];
+      if (last && last.kind === 'agent-group') {
+        last.agents.push(n);
+      } else {
+        out.push({ kind: 'agent-group', id: `ag-${n.id}`, agents: [n] });
+      }
+      continue;
     }
+    out.push(n);
   }
   return out;
 }

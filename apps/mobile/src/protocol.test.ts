@@ -36,6 +36,10 @@ test('toWsUrl maps scheme and token query', () => {
     toWsUrl('https://relay.example.com', 'tok'),
     'wss://relay.example.com/?token=tok',
   );
+  assert.equal(
+    toWsUrl('https://cds.zhangsw.work', 'sess', '/api/ws'),
+    'wss://cds.zhangsw.work/api/ws?token=sess',
+  );
 });
 
 test('wrapFwd keeps application payload', () => {

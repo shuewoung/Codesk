@@ -95,4 +95,4 @@ apps/
 
 ## 🔒 许可协议
 
-本项目基于 [MIT License](LICENSE) 开源许可发布。
+本项目基于 [Apache-2.0](../../LICENSE) 开源许可发布。
