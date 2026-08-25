@@ -56,6 +56,13 @@ function expoWebDevUp(cb) {
     cb(expoWebProbe.up);
     return;
   }
+  let done = false;
+  const finish = (up) => {
+    if (done) return;
+    done = true;
+    expoWebProbe = { at: Date.now(), up };
+    cb(up);
+  };
   const req = http.get({
     host: '127.0.0.1',
     port: EXPO_WEB_PORT,
@@ -63,17 +70,12 @@ function expoWebDevUp(cb) {
     timeout: 250,
   }, (r) => {
     r.resume();
-    expoWebProbe = { at: Date.now(), up: true };
-    cb(true);
+    finish(true);
   });
-  req.on('error', () => {
-    expoWebProbe = { at: Date.now(), up: false };
-    cb(false);
-  });
+  req.on('error', () => finish(false));
   req.on('timeout', () => {
     req.destroy();
-    expoWebProbe = { at: Date.now(), up: false };
-    cb(false);
+    finish(false);
   });
 }
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
@@ -2288,6 +2290,7 @@ function preloadStaticAssets(dir = PUBLIC_DIR) {
 preloadStaticAssets();
 
 function sendBuffer(req, res, statusCode, contentType, data, extraHeaders = {}) {
+  if (res.writableEnded || res.headersSent) return;
   const headers = { ...extraHeaders, 'Content-Type': contentType };
   // 大于 1KB 的响应启用 gzip（history JSON 与文本文件收益最大）
   const accept = req.headers['accept-encoding'] || '';

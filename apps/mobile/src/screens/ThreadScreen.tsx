@@ -8,6 +8,7 @@ import {
   Dimensions,
   FlatList,
   Keyboard,
+  type KeyboardEvent,
   Linking,
   Platform,
   useWindowDimensions,
@@ -87,6 +88,10 @@ export function ThreadScreen({
   const phone = screenW < 700;
   const [draft, setDraft] = useState('');
   const [kb, setKb] = useState(0);
+  const [imeOpen, setImeOpen] = useState(false);
+  const restHRef = useRef(screenH);
+  const screenHRef = useRef(screenH);
+  screenHRef.current = screenH;
   const [plus, setPlus] = useState(false);
   const [sheet, setSheet] = useState<'none' | 'status' | 'more' | 'rename' | 'model' | 'effort' | 'access' | 'search' | 'goal' | 'skill' | 'mcp' | 'plugin' | 'plan' | 'review' | 'steer'>('none');
   const [goalDraft, setGoalDraft] = useState('');
@@ -163,16 +168,34 @@ export function ThreadScreen({
   }, [session.goal, sheet, threadId]);
 
   useEffect(() => {
-    if (Platform.OS !== 'ios') {
+    if (imeOpen || isInputFocused) return;
+    restHRef.current = screenH;
+  }, [screenH, imeOpen, isInputFocused]);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') {
       setKb(0);
+      setImeOpen(false);
       return;
     }
-    const show = Keyboard.addListener('keyboardWillShow', (e) => {
-      setKb(Math.max(0, e.endCoordinates.height - insets.bottom));
-    });
-    const hide = Keyboard.addListener('keyboardWillHide', () => {
+    const onShow = (e: KeyboardEvent) => {
+      const imeH = Math.max(0, e.endCoordinates.height);
+      const apply = () => {
+        const resizedBy = Math.max(0, restHRef.current - screenHRef.current);
+        setKb(Math.max(0, imeH - insets.bottom - resizedBy));
+        setImeOpen(true);
+      };
+      apply();
+      if (Platform.OS !== 'ios') requestAnimationFrame(apply);
+    };
+    const onHide = () => {
       setKb(0);
-    });
+      setImeOpen(false);
+    };
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const show = Keyboard.addListener(showEvt, onShow);
+    const hide = Keyboard.addListener(hideEvt, onHide);
     return () => {
       show.remove();
       hide.remove();
@@ -365,7 +388,7 @@ export function ThreadScreen({
   }, [dismissFailedSend]);
 
   return (
-    <View style={[styles.root, { backgroundColor: colors.bg, paddingBottom: kb > 0 ? kb : insets.bottom + 8 }]}>
+    <View style={[styles.root, { backgroundColor: colors.bg, paddingBottom: kb > 0 ? kb : ((imeOpen || (Platform.OS === 'web' && isInputFocused && phone)) ? 8 : insets.bottom + 8) }]}>
       <View style={styles.mainWrap}>
         <View style={[styles.header, { borderBottomColor: colors.line }]}>
           <View style={styles.headerLeft}>
@@ -1013,9 +1036,13 @@ export function ThreadScreen({
             editable={session.conn === 'connected' && !approval && !isQuotaExhausted(session.quota)}
             underlineColorAndroid="transparent"
             onPressIn={dismissComposerPopups}
-            onFocus={() => {
+            onFocus={(e) => {
               dismissComposerPopups();
               setIsInputFocused(true);
+              if (Platform.OS === 'web') {
+                const node = e.target as unknown as { scrollIntoView?: (opts?: ScrollIntoViewOptions) => void };
+                node.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+              }
             }}
             onBlur={() => setIsInputFocused(false)}
           />

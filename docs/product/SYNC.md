@@ -77,7 +77,7 @@
 
 ### 2. 移动端 App 交互规范 (`apps/mobile`)
 - **版本检查**：在 `SettingsScreen.tsx` 中直接通过原生 `fetch('https://codesk.icu/version.json')` 检查版本，当 `versionCode > 110` 时原生弹窗引导下载。
-- **软键盘视口自适应**：在 Android 与 Web 环境下依赖系统原生缩放，严禁手动叠加固定像素 `paddingBottom`（避免产生双重叠加抬高）；iOS 仅在扣除 Safe Area 后按差值进行微调。
+- **软键盘视口自适应**：Android 用 `adjustResize`；若 edge-to-edge 下窗口其实没缩小，再按「键盘高度 − 已缩小量 − Safe Area」补差，禁止与 resize 双重叠加。Web 把 `#root` 钉在 `visualViewport`（含 `offsetTop`），键盘打开时只留 8px 底边，不要再叠键盘像素。iOS 仍用 `keyboardWillShow` 差值。
 - **Diff 节点就地展开**：`flattenItems` 中的 diff 节点必须透传 `patch` 字段，支持在对话流中直接展开行内代码差异。
 
 ### 3. Web 控制台与 Mobile 端对齐规范 (`apps/web-hub` & `apps/mobile`)

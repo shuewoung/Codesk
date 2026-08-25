@@ -13,6 +13,7 @@ import { SessionProvider, useSession } from './src/session';
 import { subscribeJpushOpens } from './src/push';
 import { ThemeProvider, useTheme } from './src/theme-context';
 import { readBrowserThreadId, syncBrowserThreadId } from './src/thread-route';
+import { useWebViewportLock } from './src/web-viewport';
 
 type Shell =
   | { name: 'pair' }
@@ -249,6 +250,7 @@ function Root() {
 }
 
 export default function App() {
+  useWebViewportLock();
   return (
     <SafeAreaProvider>
       <ThemeProvider>
