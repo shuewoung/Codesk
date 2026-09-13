@@ -1,11 +1,19 @@
 import * as Clipboard from 'expo-clipboard';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { artifactCycle, canShowArtifacts, parentPath, shouldRefreshArtifacts } from '../utils/file-panel';
+import { reviewFilePath } from '../utils/thread-ui';
 import { Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { formatContextUsage, formatQuotaLine } from '../quota';
 import { useHistories, useSession, useTools, useWorkspace } from '../session';
 import { radius, space } from '../theme';
 import { useTheme } from '../theme-context';
 import type { TreeNode } from '../types';
+import { triggerHaptic } from '../utils/haptics';
+import { TerminalView } from './TerminalView';
+import { UnifiedDiffView } from '../components/UnifiedDiffView';
+import { FileIcon, formatFileSize } from '../components/FileIcon';
+export { getFileIconInfo } from '../components/FileIcon';
+export type FileEntry = { path: string; name: string; isDir: boolean; size?: number; mtimeMs?: number };
 
 const webNoOutline = Platform.OS === 'web'
   ? ({ outlineWidth: 0, outlineStyle: 'none' as any } as any)
@@ -44,47 +52,88 @@ export function FilePanel({
   threadId,
   onOpenFile,
   onOpenThread,
+  onSelectFiles,
+  onClose,
 }: {
   threadId?: string;
   onOpenFile: (path: string) => void;
   onOpenThread?: (id: string) => void;
+  onSelectFiles?: (files: FileEntry[]) => void;
+  onClose?: () => void;
 }) {
   const session = useSession();
   const { histories, openThread } = useHistories();
   const tools = useTools();
   const workspace = useWorkspace();
   const { colors } = useTheme();
+  const { requestTree, listArtifacts, searchWorkspace } = workspace;
+  const { gitStatus, gitDiff } = tools;
+  const git = tools.git?.threadId === threadId ? tools.git : null;
+  const [gitFile, setGitFile] = useState('');
+  const selectedGitFile = git?.files?.find(file => file.path === gitFile);
+  useEffect(() => setGitFile(''), [threadId]);
   const history = threadId ? histories[threadId] : undefined;
-  const cwd = history?.cwd || session.projects[0]?.cwd || '';
+  const cwd = history?.cwd || session.threads.find(t => t.id === threadId)?.cwd || '';
+  const [selected, setSelected] = useState<Record<string, FileEntry>>({});
+  const [located, setLocated] = useState('');
+  useEffect(() => { setSelected({}); setLocated(''); }, [threadId, cwd]);
+  const toggleFile = (file: FileEntry) => setSelected(prev => { const next = { ...prev }; if (next[file.path]) delete next[file.path]; else next[file.path] = file; return next; });
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [filterQ, setFilterQ] = useState('');
   const [filterFocused, setFilterFocused] = useState(false);
-  const [tab, setTab] = useState<'files' | 'git'>('files');
-  const [cmd, setCmd] = useState('');
+  const [tab, setTab] = useState<'artifacts' | 'files' | 'git' | 'term'>(onSelectFiles ? 'files' : 'artifacts');
+  const panelRequest = session.requestState(tab === 'artifacts' ? 'list_artifacts' : 'get_workspace_tree', threadId, tab === 'artifacts' ? undefined : cwd);
+  const artifactRequest = session.requestState('list_artifacts', threadId);
+  const cycle = artifactCycle(history, session.threads.find(t => t.id === threadId)?.status);
+  const cycleKey = JSON.stringify([threadId, cwd, cycle.key]);
+  const processedCycle = useRef<string | undefined>(undefined);
+  const currentRequestId = useRef(artifactRequest?.requestId);
+  currentRequestId.current = artifactRequest?.requestId;
+  const [artifactRefresh, setArtifactRefresh] = useState<{ key: string; staleRequestId?: string }>();
+  const artifactsVisible = canShowArtifacts(artifactRefresh?.key, cycleKey, cycle.active, artifactRequest, artifactRefresh?.staleRequestId);
+  const [artifactFilter, setArtifactFilter] = useState<'all' | 'images' | 'documents'>('all');
+  const artifacts = artifactsVisible ? workspace.artifacts.filter(file => (!file.threadId || file.threadId === threadId) && (artifactFilter === 'all' || (artifactFilter === 'images' ? /\.(png|jpe?g|webp|gif)$/i.test(file.path) : !/\.(png|jpe?g|webp|gif)$/i.test(file.path)))).sort((a, b) => String(a.turnId || '').localeCompare(String(b.turnId || ''))) : [];
+  const artifactLabel = artifactsVisible && workspace.artifactsScope === 'session_confirmed' ? '会话已确认文件' : '本次产物';
   const [copied, setCopied] = useState('');
 
   useEffect(() => {
-    if (threadId) {
-      workspace.requestTree(threadId, cwd);
-      workspace.listArtifacts(threadId, cwd);
+    if (threadId) requestTree(threadId, cwd);
+  }, [threadId, cwd, requestTree]);
+
+  useEffect(() => {
+    const refresh = shouldRefreshArtifacts(processedCycle.current, cycleKey, cycle.active);
+    processedCycle.current = cycleKey;
+    if (cycle.active) setArtifactRefresh(undefined);
+    if (threadId && refresh) {
+      setArtifactRefresh({ key: cycleKey, staleRequestId: currentRequestId.current });
+      listArtifacts(threadId, cwd);
     }
-  }, [threadId, cwd]);
+  }, [threadId, cwd, cycleKey, cycle.active, listArtifacts]);
 
   useEffect(() => {
     const q = filterQ.trim();
     if (!threadId || q.length < 2) return;
-    const timer = setTimeout(() => workspace.searchWorkspace(threadId, cwd, q), 220);
+    const timer = setTimeout(() => searchWorkspace(threadId, cwd, q), 220);
     return () => clearTimeout(timer);
-  }, [filterQ, threadId, cwd]);
+  }, [filterQ, threadId, cwd, searchWorkspace]);
 
   const displayedTree = useMemo(() => filterTree(workspace.tree.tree, filterQ.trim()), [workspace.tree.tree, filterQ]);
   const dirs = useMemo(() => collectDirs(displayedTree), [displayedTree]);
 
   useEffect(() => {
+    setOpen({});
+  }, [workspace.tree.cwd]);
+
+  useEffect(() => {
+    if (!filterQ.trim()) return;
     const next: Record<string, boolean> = {};
     for (const d of dirs) next[d] = true;
     setOpen(next);
-  }, [workspace.tree.cwd, dirs, filterQ]);
+  }, [filterQ, dirs]);
+
+  useEffect(() => {
+    if (tab === 'git' && threadId) { gitStatus(threadId); gitDiff(threadId); }
+  }, [tab, threadId, gitStatus, gitDiff]);
 
   const accountLeft = session.quota.primaryUsedPercent != null
     ? Math.max(0, 100 - session.quota.primaryUsedPercent)
@@ -106,14 +155,20 @@ export function FilePanel({
   return (
     <View style={[styles.root, { backgroundColor: colors.shell }]}>
       <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: space.md, paddingTop: 10 }}>
-        {(['files', 'git'] as const).map((id) => (
+        {([
+          ['artifacts', artifactLabel],
+          ['files', '项目文件'],
+          ['git', 'Git'],
+          ['term', '终端'],
+        ] as const).filter(([id]) => !onSelectFiles || id === 'files' || id === 'artifacts').map(([id, label]) => (
           <Pressable key={id} onPress={() => setTab(id)} hitSlop={6}>
             <Text style={{ color: tab === id ? colors.text : colors.muted, fontSize: 13, fontWeight: tab === id ? '700' : '500' }}>
-              {id === 'files' ? '文件' : 'Git / 命令'}
+              {label}
             </Text>
           </Pressable>
         ))}
       </View>
+      {onClose ? <Pressable onPress={onClose} style={{ padding: 10 }}><Text style={{ color: colors.text }}>关闭文件选择</Text></Pressable> : null}
       <Pressable onLongPress={() => { void copyPath(workspace.tree.cwd || cwd); }}>
         <Text style={[styles.cwd, { color: colors.muted }]} numberOfLines={2}>
           {workspace.tree.rootName || cwd || '当前工作目录'}
@@ -122,20 +177,25 @@ export function FilePanel({
       </Pressable>
       {tab === 'git' ? (
         <View style={{ flex: 1, paddingHorizontal: space.md, gap: 8 }}>
+          <Text style={{ color: colors.muted, fontSize: 12 }}>只读变更审阅 · 不暂存、不提交、不回滚。此处展示当前工作区快照，不等同于本轮产物。</Text>
+          <Text style={{ color: colors.muted, fontSize: 12 }}>分支：{git?.branch || '未提供'}</Text>
+          {(['get_git_status', 'get_git_diff'] as const).map(type => session.requestState(type, threadId)?.error ? <Text key={type} style={{ color: colors.danger }}>{session.requestState(type, threadId)?.error}</Text> : null)}
           <Pressable
-            onPress={() => { if (threadId) tools.gitStatus(threadId); }}
+            onPress={() => { if (threadId) { gitStatus(threadId); gitDiff(threadId); } }}
             style={[styles.chip, { backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth, alignSelf: 'flex-start' }]}
           >
             <Text style={{ color: colors.text, fontSize: 13 }}>刷新 Git</Text>
           </Pressable>
           <ScrollView style={{ flex: 1 }}>
-            {tools.git?.error ? (
-              <Text selectable style={{ color: '#ef4444', fontSize: 12, lineHeight: 18 }}>{tools.git.error}</Text>
-            ) : (tools.git?.files && tools.git.files.length) ? (
-              tools.git.files.map((file) => (
+            {git?.error ? (
+              <Text selectable style={{ color: '#ef4444', fontSize: 12, lineHeight: 18 }}>
+                {/not a git repository/i.test(git.error) ? '这个目录不是 git 仓库' : git.error}
+              </Text>
+            ) : (git?.files && git.files.length) ? (
+              git.files.map((file) => (
                 <Pressable
                   key={file.path}
-                  onPress={() => onOpenFile(file.path)}
+                  onPress={() => setGitFile(file.path)}
                   style={[styles.chip, { backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth, marginBottom: 6, alignSelf: 'stretch' }]}
                 >
                   <Text style={{ color: colors.text, fontSize: 13 }} numberOfLines={1}>{file.path}</Text>
@@ -144,63 +204,67 @@ export function FilePanel({
               ))
             ) : (
               <Text selectable style={{ color: colors.muted, fontSize: 12, lineHeight: 18 }}>
-                {tools.git?.status || '打开会话后点刷新。'}
+                {git?.status || (threadId ? '正在读取 Git…' : '打开一个会话后再看 Git。')}
               </Text>
             )}
-            {tools.git?.log ? (
-              <Text selectable style={{ color: colors.muted, fontSize: 11, lineHeight: 16, marginTop: 8 }}>
-                {tools.git.log.slice(0, 1500)}
-              </Text>
-            ) : null}
+            {selectedGitFile ? <View style={{ gap: 8 }}>
+              <Text selectable style={{ color: colors.text }}>{selectedGitFile.path}</Text>
+              {selectedGitFile.patch ? <UnifiedDiffView patch={selectedGitFile.patch} /> : <Text style={{ color: colors.muted }}>{selectedGitFile.binary ? '二进制文件，无文本差异' : '没有可用文本差异（未跟踪文件或仅元数据变更）'}</Text>}
+              {!/D/.test(selectedGitFile.status || '') ? <Pressable onPress={() => onOpenFile(reviewFilePath(cwd, selectedGitFile.path))}><Text style={{ color: colors.text }}>打开文件</Text></Pressable> : null}
+            </View> : null}
+            {!selectedGitFile && git?.diff ? <View style={{ gap: 8, marginTop: 8 }}>
+              <Text style={{ color: colors.muted, fontSize: 12 }}>工作区差异{git.truncated ? '（已截断）' : ''}</Text>
+              <UnifiedDiffView patch={git.diff} />
+            </View> : null}
+            <Text style={{ color: colors.muted, marginTop: 12 }}>最近提交</Text>
+            {git?.commits?.length ? git.commits.map(commit => <View key={commit.hash} style={{ paddingVertical: 8 }}>
+              <Text selectable style={{ color: colors.text }}>{commit.subject}</Text>
+              <Text selectable style={{ color: colors.muted, fontSize: 11 }}>{commit.hash.slice(0, 8)} · {commit.author} · {commit.date}{commit.refs ? ` · ${commit.refs}` : ''}</Text>
+            </View>) : <Text style={{ color: colors.muted }}>暂无提交记录</Text>}
           </ScrollView>
-          <View style={{ flexDirection: 'row', gap: 8, paddingBottom: 8 }}>
-            <TextInput
-              value={cmd}
-              onChangeText={setCmd}
-              placeholder="$ 在会话目录跑一条命令"
-              placeholderTextColor={colors.muted}
-              style={[
-                styles.searchInput,
-                { flex: 1, backgroundColor: colors.bg, color: colors.text, borderColor: colors.line, borderWidth: 1 },
-                webNoOutline,
-              ]}
-              onSubmitEditing={() => {
-                const next = cmd.trim().replace(/^\$\s*/, '');
-                if (threadId && next) {
-                  tools.runCommand(threadId, next);
-                  setCmd('');
-                }
-              }}
-            />
-            <Pressable
-              onPress={() => { if (threadId) tools.stopCommand(threadId); }}
-              style={[styles.chip, { backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth }]}
-            >
-              <Text style={{ color: colors.text, fontSize: 13 }}>停</Text>
-            </Pressable>
-          </View>
-          {tools.commandHist.length ? (
-            <ScrollView horizontal style={{ maxHeight: 36 }}>
-              {tools.commandHist.map((row) => (
-                <Pressable
-                  key={row.command}
-                  onPress={() => {
-                    if (threadId) tools.runCommand(threadId, row.command);
-                  }}
-                  style={[styles.chip, { marginRight: 6, backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth }]}
-                >
-                  <Text style={{ color: colors.muted, fontSize: 11 }}>{row.command.slice(0, 24)}</Text>
-                </Pressable>
-              ))}
-            </ScrollView>
-          ) : null}
-          {tools.commandOut ? (
-            <ScrollView style={{ maxHeight: 140, marginBottom: 8 }}>
-              <Text selectable style={{ color: colors.muted, fontSize: 11, lineHeight: 16 }}>{tools.commandOut.slice(-4000)}</Text>
-            </ScrollView>
-          ) : null}
         </View>
       ) : null}
+      {tab === 'term' ? (
+        threadId ? (
+          <TerminalView
+            threadId={threadId}
+            chunk={tools.ptyChunk}
+            alive={Boolean(tools.ptyAlive[threadId])}
+            error={tools.ptyError}
+            openPty={tools.openPty}
+            writePty={tools.writePty}
+            resizePty={tools.resizePty}
+          />
+        ) : (
+          <Text style={{ color: colors.muted, fontSize: 12, paddingHorizontal: space.md }}>打开一个会话后再用终端。</Text>
+        )
+      ) : null}
+      {(tab === 'artifacts' || tab === 'files') ? <View style={{ paddingHorizontal: space.md, paddingVertical: 6, gap: 6 }}>
+        {panelRequest?.status === 'loading' ? <Text style={{ color: colors.muted }}>正在加载…</Text> : null}
+        {panelRequest?.status === 'error' || panelRequest?.status === 'timeout' ? <Text style={{ color: colors.danger }}>{panelRequest.error || '加载失败，请重试'}</Text> : null}
+        <Pressable onPress={() => { if (threadId) { workspace.requestTree(threadId, cwd); workspace.listArtifacts(threadId, cwd); } }}><Text style={{ color: colors.text }}>刷新文件</Text></Pressable>
+      </View> : null}
+      {tab === 'artifacts' ? <ScrollView contentContainerStyle={styles.list}>
+        <View style={{ flexDirection: 'row', gap: 16, padding: 12 }}>{(['all', 'images', 'documents'] as const).map(filter => <Pressable key={filter} onPress={() => setArtifactFilter(filter)}><Text style={{ color: artifactFilter === filter ? colors.text : colors.muted }}>{filter === 'all' ? '全部产物' : filter === 'images' ? '图片' : '其他文件'}</Text></Pressable>)}</View>
+        <Text style={{ color: colors.muted, padding: space.md }}>{cycle.active ? '本轮运行中，已隐藏上一轮产物；完成后自动刷新。' : artifactsVisible && workspace.artifactsScope === 'session_confirmed' ? '未能确定最新轮次边界，下列为会话已确认文件，不代表本次生成。' : '仅展示最新轮次真实产物记录；项目近期文档不计为产物。'}</Text>
+        {artifactsVisible && workspace.artifactsCoverage?.truncated ? <Text style={{ color: colors.warn, paddingHorizontal: space.md }}>索引范围有限：仅读取 {formatFileSize(workspace.artifactsCoverage.bytesRead)} / {formatFileSize(workspace.artifactsCoverage.totalBytes)}，可能遗漏文件。</Text> : null}
+        {artifactsVisible && workspace.artifactsTurnId ? <Text style={{ color: colors.muted, paddingHorizontal: space.md, fontSize: 11 }}>轮次：{workspace.artifactsTurnId}</Text> : null}
+        {!artifacts.length ? <Text style={{ color: colors.muted, padding: space.md }}>{artifactRequest?.status === 'loading' ? '正在读取产物记录…' : '暂无已确认产物'}</Text> : artifacts.map((file, index) => (
+          <View key={file.path} style={{ padding: 10, gap: 6 }}>
+            {index === 0 || file.turnId !== artifacts[index - 1].turnId ? <Text style={{ color: colors.muted }}>轮次：{file.turnId || '会话已确认（轮次未知）'}</Text> : null}
+            <Pressable onPress={() => onSelectFiles ? toggleFile({ ...file, isDir: false }) : onOpenFile(file.path)} style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+              <FileIcon name={file.name} />
+              <Text style={{ flex: 1, color: colors.text }}>{onSelectFiles ? (selected[file.path] ? '[已选] ' : '[选择] ') : ''}{file.name}</Text>
+            </Pressable>
+            <Text selectable style={{ color: colors.muted, fontSize: 11 }}>{file.path}</Text>
+            <Text style={{ color: colors.muted, fontSize: 11 }}>{formatFileSize(file.size)}{file.mtimeMs ? ` · ${new Date(file.mtimeMs).toLocaleString()}` : ''}{file.turnId ? ` · 轮次 ${file.turnId}` : ''}{file.timestamp ? ` · ${file.timestamp}` : ''}</Text>
+            <View style={{ flexDirection: 'row', gap: 16 }}>
+              <Pressable onPress={() => onOpenFile(file.path)}><Text style={{ color: colors.text }}>预览</Text></Pressable>
+              <Pressable onPress={() => { setTab('files'); setLocated(file.path); setFilterQ(file.name); if (threadId) workspace.requestTree(threadId, cwd, parentPath(file.path)); }}><Text style={{ color: colors.text }}>在项目中定位</Text></Pressable>
+            </View>
+          </View>
+        ))}
+      </ScrollView> : null}
       {tab !== 'files' ? null : (
       <View style={{ flex: 1 }}>
       <View style={{ paddingHorizontal: space.md, paddingBottom: 8 }}>
@@ -209,7 +273,7 @@ export function FilePanel({
           onChangeText={setFilterQ}
           onFocus={() => setFilterFocused(true)}
           onBlur={() => setFilterFocused(false)}
-          placeholder="🔍 搜索整个项目..."
+          placeholder="搜索项目文件..."
           placeholderTextColor={colors.muted}
           style={[
             styles.searchInput,
@@ -226,6 +290,7 @@ export function FilePanel({
       <View style={styles.actions}>
         <Pressable
           style={[styles.chip, { backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth }]}
+          hitSlop={6}
           onPress={() => {
             const next: Record<string, boolean> = {};
             for (const d of dirs) next[d] = true;
@@ -236,37 +301,38 @@ export function FilePanel({
         </Pressable>
         <Pressable
           style={[styles.chip, { backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth }]}
+          hitSlop={6}
           onPress={() => setOpen({})}
         >
           <Text style={{ color: colors.text, fontSize: 13 }}>全部折叠</Text>
         </Pressable>
       </View>
+      {located ? <Text selectable style={{ color: colors.muted, paddingHorizontal: space.md }}>定位：{located}</Text> : null}
       <ScrollView contentContainerStyle={styles.list}>
         {filterQ.trim().length >= 2 && workspace.workspaceHits.length ? (
           workspace.workspaceHits.map((hit) => (
             <Pressable
               key={hit.path}
-              onPress={() => onOpenFile(hit.path)}
+              onPress={() => onSelectFiles ? toggleFile({ ...hit, isDir: false }) : onOpenFile(hit.path)}
               onLongPress={() => session.queueMention(hit.path)}
               style={[styles.treeFileRow, { paddingLeft: 10 }]}
             >
-              <Text style={[styles.treeFileName, { color: colors.text }]} numberOfLines={1}>{hit.name}</Text>
+              <FileIcon name={hit.name} /><Text style={[styles.treeFileName, { color: colors.text }]} numberOfLines={1}>{onSelectFiles ? (selected[hit.path] ? "[已选] " : "[选择] ") : ""}{hit.name}</Text>
+              <Pressable onPress={() => onOpenFile(hit.path)}><Text style={{ color: colors.muted }}>预览</Text></Pressable>
               <Pressable onPress={() => session.queueMention(hit.path)} hitSlop={8}>
                 <Text style={{ color: colors.muted, fontSize: 12 }}>@</Text>
               </Pressable>
             </Pressable>
           ))
         ) : null}
-        {workspace.artifacts.length ? (
-          <View style={{ paddingHorizontal: 4, paddingBottom: 8 }}>
-            <Text style={{ color: colors.muted, fontSize: 12, marginBottom: 6 }}>产物</Text>
-            {workspace.artifacts.slice(0, 8).map((file) => (
-              <Pressable key={file.path} onPress={() => onOpenFile(file.path)} style={{ paddingVertical: 4 }}>
-                <Text style={{ color: colors.text, fontSize: 13 }}>{file.name}</Text>
-              </Pressable>
-            ))}
-          </View>
-        ) : null}
+        {!filterQ.trim() && workspace.recentDocuments.length ? <View style={{ padding: 10, gap: 6 }}>
+          <Text style={{ color: colors.muted, fontSize: 12 }}>近期文档（项目扫描，非本次产物）</Text>
+          {workspace.recentDocuments.slice(0, 8).map(file => <View key={file.path} style={{ gap: 4 }}>
+            <Pressable onPress={() => onSelectFiles ? toggleFile({ ...file, isDir: false }) : onOpenFile(file.path)} style={{ flexDirection: 'row', gap: 8 }}><FileIcon name={file.name} /><Text style={{ color: colors.text, flex: 1 }}>{selected[file.path] ? '[已选] ' : ''}{file.name}</Text></Pressable>
+            <Text selectable style={{ color: colors.muted, fontSize: 11 }}>{file.path} · {formatFileSize(file.size)}</Text>
+            {onSelectFiles ? <Pressable onPress={() => onOpenFile(file.path)}><Text style={{ color: colors.muted }}>预览</Text></Pressable> : null}
+          </View>)}
+        </View> : null}
         {(history?.subagents || []).map((agent) => (
           <Pressable
             key={agent.id}
@@ -277,7 +343,7 @@ export function FilePanel({
             style={{ paddingVertical: 6 }}
           >
             <Text style={{ color: colors.text, fontSize: 13 }}>
-              {agent.status === 'working' || agent.status === 'desktop' ? '🟢 ' : '○ '}{agent.title || agent.id.slice(0, 8)}
+              {agent.title || agent.id.slice(0, 8)} · {agent.status || 'unknown'}{agent.model ? ` · ${agent.model}` : ''}
             </Text>
           </Pressable>
         ))}
@@ -304,6 +370,8 @@ export function FilePanel({
                 workspace.requestTree(threadId, workspace.tree.cwd || cwd, p);
               }
             }}
+            selected={onSelectFiles ? selected : undefined}
+            onSelect={onSelectFiles ? toggleFile : undefined}
             onOpenFile={onOpenFile}
             onMention={(p) => session.queueMention(p)}
             onCopyPath={(p) => { void copyPath(p); }}
@@ -315,6 +383,14 @@ export function FilePanel({
       </ScrollView>
       </View>
       )}
+      {onSelectFiles ? <View style={{ padding: space.md, gap: 8, borderTopWidth: 1, borderColor: colors.line }}>
+        <Text style={{ color: colors.muted }}>宿主机项目文件 · 已选 {Object.keys(selected).length} 项</Text>
+        <Text style={{ color: colors.muted, fontSize: 11 }}>默认会话工作目录；文件访问仍遵循宿主机目录权限。</Text>
+        <View style={{ flexDirection: 'row', gap: 20 }}>
+          <Pressable disabled={!Object.keys(selected).length} onPress={() => onSelectFiles(Object.values(selected))}><Text style={{ color: Object.keys(selected).length ? colors.text : colors.muted, fontWeight: '700' }}>确认选择</Text></Pressable>
+          <Pressable onPress={() => setSelected({})}><Text style={{ color: colors.muted }}>清空选择</Text></Pressable>
+        </View>
+      </View> : null}
       <View style={[styles.bars, { borderTopColor: colors.line }]}>
         <UsageBar label="账号剩余" value={accountLeft} color={colors.ok} track={colors.card} text={colors.muted} />
         <UsageBar label="上下文剩余" value={ctxLeft} color={colors.warn} track={colors.card} text={colors.muted} />
@@ -334,98 +410,6 @@ export function FilePanel({
   );
 }
 
-export type FileIconInfo = {
-  text: string;
-  color?: string;
-  isBadge?: boolean;
-};
-
-export function getFileIconInfo(filename: string): FileIconInfo {
-  const lower = filename.toLowerCase();
-
-  // 1. Exact / Special Filenames
-  if (lower === '.gitignore' || lower === '.gitmodules' || lower === '.gitattributes') {
-    return { text: '◆', color: '#f05032' };
-  }
-  if (lower.startsWith('readme') || lower.endsWith('.md') || lower.endsWith('.markdown') || lower.endsWith('.mdx')) {
-    return { text: 'ℹ', color: '#38bdf8' };
-  }
-  if (lower === 'package.json' || lower === 'package-lock.json' || lower === 'pnpm-lock.yaml' || lower === 'yarn.lock' || lower === 'bun.lockb') {
-    return { text: '⬢', color: '#ef4444' };
-  }
-  if (lower.startsWith('license') || lower.startsWith('licence')) {
-    return { text: '⚖', color: '#eab308' };
-  }
-  if (lower === 'dockerfile' || lower.startsWith('docker-compose')) {
-    return { text: '🐳', color: '#38bdf8' };
-  }
-
-  // 2. Extensions
-  if (/\.(png|jpg|jpeg|gif|webp|svg|ico|bmp|avif)$/i.test(lower)) {
-    return { text: '🖼', color: '#c084fc' };
-  }
-  if (/\.(html|htm)$/i.test(lower)) {
-    return { text: '🌐', color: '#f97316' };
-  }
-  if (/\.(css|scss|sass|less)$/i.test(lower)) {
-    return { text: '🎨', color: '#38bdf8' };
-  }
-  if (/\.(tsx|ts)$/i.test(lower)) {
-    return { text: 'TS', color: '#3b82f6', isBadge: true };
-  }
-  if (/\.(jsx|js|mjs|cjs)$/i.test(lower)) {
-    return { text: 'JS', color: '#eab308', isBadge: true };
-  }
-  if (/\.(json|json5|jsonc)$/i.test(lower)) {
-    return { text: '{}', color: '#f59e0b', isBadge: true };
-  }
-  if (/\.(yaml|yml|toml|ini|cfg|conf|config|env|env\..*)$/i.test(lower)) {
-    return { text: '⚙', color: '#94a3b8' };
-  }
-  if (/\.(py|pyw|ipynb)$/i.test(lower)) {
-    return { text: '🐍', color: '#3b82f6' };
-  }
-  if (/\.(rs)$/i.test(lower)) {
-    return { text: '🦀', color: '#f97316' };
-  }
-  if (/\.(go)$/i.test(lower)) {
-    return { text: '🐹', color: '#06b6d4' };
-  }
-  if (/\.(sh|bash|zsh|ps1|bat|cmd)$/i.test(lower)) {
-    return { text: '⚡', color: '#22c55e' };
-  }
-  if (/\.(log|txt|out)$/i.test(lower)) {
-    return { text: '📄', color: '#94a3b8' };
-  }
-  if (/\.(sqlite|db|sql)$/i.test(lower)) {
-    return { text: '🗄', color: '#0ea5e9' };
-  }
-  if (/\.(zip|tar|gz|7z|rar)$/i.test(lower)) {
-    return { text: '📦', color: '#ea580c' };
-  }
-  if (/\.(pdf|doc|docx|xls|xlsx|ppt|pptx)$/i.test(lower)) {
-    return { text: '📑', color: '#ef4444' };
-  }
-
-  return { text: '📄', color: '#94a3b8' };
-}
-
-function FileIconView({ name }: { name: string }) {
-  const icon = getFileIconInfo(name);
-  if (icon.isBadge) {
-    return (
-      <View style={[styles.miniBadge, { borderColor: icon.color }]}>
-        <Text style={[styles.miniBadgeText, { color: icon.color }]}>{icon.text}</Text>
-      </View>
-    );
-  }
-  return (
-    <Text style={[styles.fileIconChar, { color: icon.color || '#94a3b8' }]}>
-      {icon.text}
-    </Text>
-  );
-}
-
 function TreeRow({
   node,
   depth,
@@ -434,7 +418,11 @@ function TreeRow({
   onOpenFile,
   onMention,
   onCopyPath,
+  selected,
+  onSelect,
 }: {
+  selected?: Record<string, FileEntry>;
+  onSelect?: (file: FileEntry) => void;
   node: TreeNode;
   depth: number;
   open: Record<string, boolean>;
@@ -449,8 +437,14 @@ function TreeRow({
     return (
       <View>
         <Pressable
-          onPress={() => onToggle(node.path)}
-          onLongPress={() => onCopyPath(node.path)}
+          onPress={() => {
+            triggerHaptic('light');
+            onToggle(node.path);
+          }}
+          onLongPress={() => {
+            triggerHaptic('medium');
+            onCopyPath(node.path);
+          }}
           delayLongPress={420}
           style={({ pressed }) => [
             styles.treeDirRow,
@@ -472,6 +466,8 @@ function TreeRow({
                 node={child}
                 depth={depth + 1}
                 open={open}
+                selected={selected}
+                onSelect={onSelect}
                 onToggle={onToggle}
                 onOpenFile={onOpenFile}
                 onMention={onMention}
@@ -484,8 +480,14 @@ function TreeRow({
   }
   return (
     <Pressable
-      onPress={() => onOpenFile(node.path)}
-      onLongPress={() => onCopyPath(node.path)}
+      onPress={() => {
+        triggerHaptic('light');
+        if (onSelect) onSelect({ path: node.path, name: node.name, isDir: false }); else onOpenFile(node.path);
+      }}
+      onLongPress={() => {
+        triggerHaptic('medium');
+        onCopyPath(node.path);
+      }}
       delayLongPress={420}
       style={({ pressed }) => [
         styles.treeFileRow,
@@ -493,10 +495,11 @@ function TreeRow({
         pressed && { backgroundColor: colors.card },
       ]}
     >
-      <FileIconView name={node.name} />
+      <FileIcon name={node.name} />
       <Text style={[styles.treeFileName, { color: colors.text, flex: 1 }]} numberOfLines={1}>
-        {node.name}
+        {selected ? (selected[node.path] ? "[已选] " : "[选择] ") : ""}{node.name}
       </Text>
+      {onSelect ? <Pressable onPress={() => onOpenFile(node.path)}><Text style={{ color: colors.muted }}>预览</Text></Pressable> : null}
       <Pressable onPress={() => onMention?.(node.path)} hitSlop={8}>
         <Text style={{ color: colors.muted, fontSize: 12 }}>@</Text>
       </Pressable>

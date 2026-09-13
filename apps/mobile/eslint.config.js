@@ -6,6 +6,7 @@ module.exports = [
       'android/**',
       'dist/**',
       'dist-web/**',
+      'dist-web.bak-*/**',
       'node_modules/**',
       'src/jpush-stub.js',
     ],

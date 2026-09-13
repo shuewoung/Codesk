@@ -11,9 +11,48 @@ import {
   groupCommandNodes,
   commandGroupCounts,
   isApprovalExpired,
+  lockBannerKind,
   mergeHistory,
   parseThreadList,
 } from './history';
+
+test('flattenItems preserves long ordinary JSON and callback-looking fields', () => {
+  for (const content of [
+    JSON.stringify({ status: 'ok', completed: true, description: 'normal JSON '.repeat(20) }),
+    JSON.stringify([{ cell_id: 'example', value: 'x'.repeat(100) }]),
+    JSON.stringify({ agent_path: '/example/path', description: 'x'.repeat(100) }),
+    '```json\n' + JSON.stringify({ status: 'ok', value: 'x'.repeat(100) }) + '\n```',
+  ]) {
+    for (const role of ['user', 'assistant']) {
+      const nodes = flattenItems([{ type: 'message', role, content }]);
+      assert.equal(nodes.length, 1);
+      assert.equal(nodes[0].text, content);
+      assert.equal(nodes[0].kind, role);
+    }
+  }
+});
+
+test('flattenItems still unwraps explicit subagent callbacks', () => {
+  const nodes = flattenItems([{ type: 'message', role: 'user', content: JSON.stringify({
+    agent_path: '/agents/worker', status: { completed: 'Finished work '.repeat(10) },
+  }) }]);
+  assert.equal(nodes[0].kind, 'assistant');
+  assert.equal(nodes[0].text, 'Finished work '.repeat(10));
+});
+
+test('flattenItems keeps image-only user messages', () => {
+  const bubbles = flattenItems([
+    {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'localImage', path: 'D:\\tmp\\a.png', name: 'a.png' }],
+    },
+  ]);
+  assert.equal(bubbles.length, 1);
+  assert.equal(bubbles[0].kind, 'user');
+  assert.equal(bubbles[0].text, '[图片]');
+  assert.equal(bubbles[0].images?.[0].path, 'D:\\tmp\\a.png');
+});
 
 test('flattenItems keeps user/assistant text and skips developer/context', () => {
   const bubbles = flattenItems([
@@ -45,6 +84,20 @@ test('flattenItems folds command, patch and subagent into text', () => {
   assert.equal(bubbles[1].kind, 'diff');
   assert.equal(bubbles[2].kind, 'agent');
   assert.match(bubbles[2].text, /已更新/);
+});
+
+test('older windows expand past 2000 and live delta retains complete history', () => {
+  const items = Array.from({ length: 2579 }, (_, i) => ({ type: 'message', role: 'user', content: String(i) }));
+  const first = mergeHistory(undefined, { items: items.slice(-2000), full: true, hasMore: true, totalItems: 2579, rev: 5208 });
+  const full = mergeHistory(first, { items, full: true, hasMore: false, totalItems: 2579, rev: 5208 });
+  assert.equal(full.items.length, 2579);
+  assert.equal(full.hasMore, false);
+  const next = { type: 'message', role: 'assistant', content: 'next' };
+  const updated = mergeHistory(full, { items: [next], hasMore: true, totalItems: 2580, rev: 5209, delta: { baseRev: 5208, newItems: [next] } });
+  assert.equal(updated.items.length, 2580);
+  assert.equal(updated.items[0].content, '0');
+  assert.equal(updated.items.at(-1)?.content, 'next');
+  assert.equal(updated.hasMore, false);
 });
 
 test('mergeHistory applies matching delta and replaces on mismatch', () => {
@@ -194,4 +247,47 @@ test('collectApprovalIds and percent-encoded commands decode', () => {
   assert.equal(isApprovalExpired({ at: Date.now() - APPROVAL_TTL_MS - 1 }), true);
   assert.deepEqual(collectApprovalIds({ requestId: 'a', id: 'a', ids: ['b', 'a'] }), ['a', 'b']);
   assert.match(decodeApprovalCommand('C:\\x\\D%3A%5C06_%E7%9F%AD'), /06_短/);
+});
+
+test('mergeHistory accepts desktop-stale lockHolder and keeps null/absent semantics', () => {
+  const base = { ...emptyHistory(), items: [] };
+  assert.equal(mergeHistory(base, { lockHolder: 'desktop' }).lockHolder, 'desktop');
+  assert.equal(mergeHistory(base, { lockHolder: 'hub' }).lockHolder, 'hub');
+  assert.equal(mergeHistory(base, { lockHolder: 'desktop-stale' }).lockHolder, 'desktop-stale');
+
+  // Missing (or unrecognized) holder keeps the previous value.
+  const stale = mergeHistory(base, { lockHolder: 'desktop-stale' });
+  assert.equal(mergeHistory(stale, { status: 'idle' }).lockHolder, 'desktop-stale');
+  assert.equal(mergeHistory(stale, { lockHolder: 'someone-else' }).lockHolder, 'desktop-stale');
+  assert.equal(mergeHistory(undefined, { status: 'idle' }).lockHolder, null);
+
+  // Explicit null clears the holder.
+  assert.equal(mergeHistory(stale, { lockHolder: null }).lockHolder, null);
+  // ...and a later missing holder does not resurrect it.
+  const cleared = mergeHistory(stale, { lockHolder: null });
+  assert.equal(mergeHistory(cleared, { status: 'working' }).lockHolder, null);
+});
+
+test('lockBannerKind maps holders to banner cases; hub renders no banner', () => {
+  assert.equal(lockBannerKind('desktop'), 'desktop');
+  assert.equal(lockBannerKind('desktop-stale'), 'desktop-stale');
+  assert.equal(lockBannerKind('hub'), null);
+  assert.equal(lockBannerKind(null), null);
+  assert.equal(lockBannerKind(undefined), null);
+  assert.equal(lockBannerKind('someone-else'), null);
+
+  // Holder transitions resolved through mergeHistory render/disappear correctly:
+  // desktop -> desktop-stale -> hub (no banner) -> explicit null (still no banner).
+  let h = mergeHistory(undefined, { lockHolder: 'desktop' });
+  assert.equal(lockBannerKind(h.lockHolder), 'desktop');
+  h = mergeHistory(h, { lockHolder: 'desktop-stale' });
+  assert.equal(lockBannerKind(h.lockHolder), 'desktop-stale');
+  h = mergeHistory(h, { lockHolder: 'hub' });
+  assert.equal(lockBannerKind(h.lockHolder), null);
+  // Missing holder in a later delta keeps the stored value (still no banner for hub).
+  h = mergeHistory(h, { status: 'working' });
+  assert.equal(h.lockHolder, 'hub');
+  assert.equal(lockBannerKind(h.lockHolder), null);
+  h = mergeHistory(h, { lockHolder: null });
+  assert.equal(lockBannerKind(h.lockHolder), null);
 });

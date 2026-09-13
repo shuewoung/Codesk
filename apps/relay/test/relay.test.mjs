@@ -180,7 +180,7 @@ test('hub can request a pair code over websocket', async () => {
   hubWs.send(JSON.stringify({ v: 1, type: 'request_pair_code', hubId: hub.hubId, payload: {} }));
   const issued = await waitType(hubWs, 'pair_code');
   assert.ok(issued.payload.code);
-  assert.equal(typeof issued.payload.expiresAtMs, 'number');
+  assert.equal(issued.payload.expiresAtMs, null);
   const device = await json('POST', '/api/relay/pair', { code: issued.payload.code });
   assert.equal(device.hubId, hub.hubId);
   hubWs.close();
@@ -322,3 +322,60 @@ async function raw(method, pathname, body, token, extraHeaders = {}) {
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+test('persistent QR invites remain stable, reusable and replaceable independently of device tokens', async () => {
+  const hub = { hubId: 'hub-persistent', hubSecret: 'secret-persistent-1234' };
+  const hubWs = await registerHub(hub, relay.store.createInvite().code);
+  const first = await issuePair(hub);
+  assert.equal(first.expiresAtMs, null);
+  assert.equal((await issuePair(hub)).code, first.code);
+  const a = await json('POST', '/api/relay/pair', { code: first.code });
+  const b = await json('POST', '/api/relay/pair', { code: first.code });
+  assert.notEqual(a.deviceToken, b.deviceToken);
+  relay.store.load();
+  assert.equal((await issuePair(hub)).code, first.code);
+  const next = await json('POST', '/api/relay/pair-code', { refresh: true }, null, { authorization: `Hub ${hub.hubId}:${hub.hubSecret}` });
+  assert.notEqual(next.code, first.code);
+  assert.equal((await raw('POST', '/api/relay/pair', { code: first.code })).status, 401);
+  assert.equal((await raw('GET', '/api/relay/hubs', null, a.deviceToken)).status, 200);
+  const phone = await openWs(wsBase, a.deviceToken);
+  const close = new Promise((resolve) => phone.once('close', (code) => resolve(code)));
+  await json('POST', '/api/relay/revoke', {}, a.deviceToken);
+  assert.equal(await close, 4403);
+  assert.equal((await raw('GET', '/api/relay/hubs', null, b.deviceToken)).status, 200);
+  hubWs.close();
+});
+
+test('malformed device cookie rejects HTTP and does not crash websocket upgrade', async () => {
+  const response = await raw('GET', '/api/relay/hubs', null, null, { cookie: `${relay.config.cookieName}=%E0%A4%A` });
+  assert.equal(response.status, 401);
+  const ws = new WebSocket(wsBase, { headers: { cookie: `${relay.config.cookieName}=%FF` } });
+  await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+  ws.send(JSON.stringify({ v: 1, type: 'fwd', payload: {} }));
+  assert.equal((await waitType(ws, 'error')).payload.code, 'unpaired');
+  ws.close();
+});
+
+test('revocation removes routing metadata before close handshake completes', async () => {
+  const { RelayNet } = await import('../src/ws.js');
+  const net = new RelayNet({ store: relay.store, audit: relay.audit, config: relay.config });
+  let closed = 0;
+  const socket = { readyState: 1, close: () => { closed++; }, send: () => assert.fail('revoked socket received data') };
+  net.attachDevice('device-fixture', 'hub-fixture', socket);
+  net.closeDevice('device-fixture');
+  assert.equal(closed, 1);
+  assert.equal(socket.revoked, true);
+  assert.equal(net.meta.has(socket), false);
+  assert.equal(net.isDeviceOnline('device-fixture'), false);
+  assert.equal(net.sendToDevices('hub-fixture', {}), 0);
+});
+
+test('explicit temporary invitations keep legacy single-use semantics', () => {
+  const hubId = 'hub-persistent';
+  const invitation = relay.store.createPairCode({ hubId, ttlSec: 30 });
+  assert.ok(invitation.expiresAt);
+  const device = relay.store.redeemPairCode(invitation.code);
+  assert.throws(() => relay.store.redeemPairCode(invitation.code), /invalid pairing code/);
+  invitation.expiresAt = new Date(0).toISOString();
+  assert.equal(relay.store.requireDevice(device.deviceToken).id, device.device.id);
+});

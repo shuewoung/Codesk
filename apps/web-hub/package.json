@@ -6,9 +6,10 @@
   "type": "module",
   "scripts": {
     "start": "node server/index.js",
-    "test": "node --test server/auth.test.mjs server/turn-status.test.mjs server/appserver-turn.test.mjs server/pins.test.mjs server/ipc-client.test.mjs server/plugins.test.mjs server/workspace-files.test.mjs server/quota-msg.test.mjs"
+    "test": "node --test server/history-items.test.mjs server/history-loading.test.mjs server/auth.test.mjs server/turn-status.test.mjs server/appserver-turn.test.mjs server/pins.test.mjs server/ipc-client.test.mjs server/plugins.test.mjs server/workspace-files.test.mjs server/quota-msg.test.mjs server/file-raw.test.mjs server/pty.test.mjs server/file-experience.test.mjs server/idle-release.test.mjs server/codex-bin.test.mjs server/orphan-cleanup.test.mjs server/shutdown-order.test.mjs server/relay-security.test.mjs server/workbench.test.mjs server/writer-handoff.test.mjs server/config-application.test.mjs"
   },
   "dependencies": {
+    "node-pty": "^1.1.0",
     "tweetnacl": "^1.0.3",
     "web-push": "^3.6.7",
     "ws": "^8.21.3"

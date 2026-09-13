@@ -10,6 +10,7 @@ export type Thread = {
   status?: 'working' | 'waiting_approval' | 'just_finished' | 'idle' | string;
   needsApproval?: boolean;
   isPinned?: boolean;
+  summary?: { fileChanges: number; generatedImages: number; partial?: boolean };
   updatedAt?: string;
   mtimeMs?: number;
 };
@@ -87,14 +88,26 @@ export type TokenUsage = {
   sources?: { label: string; percent: number }[];
 };
 
+export type CommandStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'uncertain';
+export type CommandState = { requestId: string; clientUserMessageId?: string; threadId?: string; status: CommandStatus; result?: unknown; error?: string | { code?: string; message?: string } };
+export type ExecutionState = { threadId: string; location: 'desktop' | 'hub' | 'unknown'; status: string; canHandoff: boolean; reason?: string; pendingUserInputs?: UserInputRequest[] };
+export type QueuedMessage = { queueId: string; threadId: string; text: string; status: string; requestId?: string; clientUserMessageId?: string; images?: unknown[] };
+export type RemoteDraft = { version: number; text: string; attachments: import('./composer-draft').ComposerPending[]; updatedAt?: number };
+export type DraftSyncState = { status: 'loading' | 'synced' | 'saving' | 'conflict' | 'error'; remote?: RemoteDraft; local?: Pick<RemoteDraft, 'text' | 'attachments'>; error?: string };
+export type UserInputRequest = { requestId: string; threadId: string; method: string; payload: { questions?: { id: string; header?: string; question: string; isSecret?: boolean; options?: { label: string; description?: string }[] }[] }; at?: number };
+export type UserInputAnswers = { answers: Record<string, { answers: string[] }> };
+
 export type ThreadHistory = {
+  needsReconcile?: boolean;
+  branch?: string;
+  executionLocation?: string;
   items: HistoryItem[];
   status: string;
   pendingApproval: { id?: string; ids?: string[]; command?: string; reason?: string; type?: string; at?: number } | null;
   activeActionText: string;
   cwd: string;
-  lockHolder?: 'desktop' | 'hub' | null;
-  subagents?: { id: string; title?: string; status?: string; cwd?: string }[];
+  lockHolder?: 'desktop' | 'desktop-stale' | 'hub' | null;
+  subagents?: { id: string; title?: string; status?: string; cwd?: string; model?: string }[];
   tokenUsage?: TokenUsage;
   rev?: number;
   totalItems?: number;
@@ -111,17 +124,40 @@ export type TreeNode = {
   children?: TreeNode[];
 };
 
+export type TimelineImage = {
+  uri?: string;
+  path?: string;
+  name?: string;
+};
+
 export type TimelineNode = {
   id: string;
-  kind: 'user' | 'assistant' | 'system' | 'diff' | 'command' | 'reasoning' | 'agent';
+  deliveryStatus?: CommandStatus;
+  attachments?: { name: string; path: string }[];
+  kind: 'user' | 'assistant' | 'system' | 'diff' | 'command' | 'reasoning' | 'agent' | 'generated-image' | 'search' | 'image-view' | 'compaction';
+  status?: string;
+  important?: boolean;
+  threadId?: string;
+  model?: string;
+  turnId?: string;
   text: string;
+  command?: string;
+  output?: string;
   path?: string;
   add?: number;
   del?: number;
   patch?: string;
+  images?: TimelineImage[];
+  searchResults?: { title: string; url: string }[];
 };
 
 export type FailedSend = {
+  pendingNamespace?: string;
+  restored?: boolean;
+  clientUserMessageId?: string;
+  mode?: 'plan' | 'review';
+  deliveryStatus?: CommandStatus;
+  draftKey?: string;
   id: string;
   threadId: string;
   text: string;
@@ -129,6 +165,8 @@ export type FailedSend = {
   working: boolean;
   kind: 'message' | 'command';
   error: string;
+  // Only retained from structured feedback with an exact matching threadId.
+  code?: 'writer_lock_conflict' | 'writer_owner_unknown';
 };
 
 export type Bubble = TimelineNode;
@@ -145,6 +183,7 @@ export type ModelInfo = {
 
 export type FileData = {
   path: string;
+  requestPath?: string;
   fileName: string;
   ext: string;
   encoding: 'utf8' | 'base64';
@@ -191,3 +230,6 @@ export type Route =
   | { name: 'thread'; threadId: string }
   | { name: 'settings' }
   | { name: 'file'; threadId: string; path: string };
+
+export type UploadTask = { draftKey?: string; taskId: string; threadId: string; identity: string; name: string; image: boolean; status: 'reading' | 'uploading' | 'success' | 'error'; path?: string; error?: string };
+export type ArtifactRecord = { name: string; path: string; threadId?: string; ext?: string; mtimeMs?: number; size?: number; source?: string; turnId?: string; timestamp?: string | number };

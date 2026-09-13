@@ -18,7 +18,7 @@ const ThemeContext = createContext<ThemeValue | null>(null);
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<ThemeName>('light');
   const [listDensity, setDensityState] = useState<ListDensity>('compact');
-  const [showProcess, setProcessState] = useState(true);
+  const [showProcess, setProcessState] = useState(false);
 
   useEffect(() => {
     void loadTheme().then(setThemeState);

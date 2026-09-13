@@ -1,7 +1,8 @@
 import net from 'node:net';
 import crypto from 'node:crypto';
 
-const PIPE = '\\\\.\\pipe\\codex-ipc';
+export const CODEX_IPC_PIPE = '\\\\.\\pipe\\codex-ipc';
+const PIPE = CODEX_IPC_PIPE;
 const INITIAL_CLIENT_ID = 'initializing-client';
 const VERSIONS = {
   initialize: 0,
@@ -116,7 +117,8 @@ function createDecoder(onMsg) {
 }
 
 export class CodexIpcClient {
-  constructor() {
+  constructor({ createConnection = net.createConnection } = {}) {
+    this.createConnection = createConnection;
     this.socket = null;
     this.clientId = INITIAL_CLIENT_ID;
     this.pending = new Map();
@@ -124,6 +126,9 @@ export class CodexIpcClient {
     this.pendingByThread = new Map();
     this.followWaiters = new Map();
     this.followed = new Set();
+    this.desiredFollows = new Set();
+    this.runtimeByThread = new Map();
+    this.onDisconnect = null;
     this.onApproval = null;
     this.onApprovalCleared = null;
     this.connectPromise = null;
@@ -132,23 +137,43 @@ export class CodexIpcClient {
   async ensureConnected() {
     if (this.socket?.writable && this.clientId !== INITIAL_CLIENT_ID) return this;
     if (this.connectPromise) return this.connectPromise;
-    this.connectPromise = this._connect().finally(() => {
-      this.connectPromise = null;
+    const connecting = this._connect().finally(() => {
+      if (this.connectPromise === connecting) this.connectPromise = null;
     });
+    this.connectPromise = connecting;
     return this.connectPromise;
   }
 
   async _connect() {
-    const socket = net.createConnection({ path: PIPE });
+    const socket = this.createConnection({ path: PIPE });
     this.socket = socket;
     this.clientId = INITIAL_CLIENT_ID;
-    await new Promise((resolve, reject) => {
-      socket.once('connect', resolve);
-      socket.once('error', reject);
-      setTimeout(() => reject(new Error('codex-ipc connect timeout')), 3000);
-    });
+    socket.on('close', () => this._disconnected(socket));
+    socket.on('error', () => { this._disconnected(socket); socket.destroy(); });
+    try {
+      await new Promise((resolve, reject) => {
+        const done = (error) => {
+          clearTimeout(timer);
+          socket.removeListener('connect', connected);
+          socket.removeListener('error', done);
+          socket.removeListener('close', closed);
+          error ? reject(error) : resolve();
+        };
+        const connected = () => done();
+        const closed = () => done(new Error('codex-ipc closed'));
+        const timer = setTimeout(() => done(new Error('codex-ipc connect timeout')), 3000);
+        socket.once('connect', connected);
+        socket.once('error', done);
+        socket.once('close', closed);
+      });
+    } catch (error) {
+      this._disconnected(socket);
+      socket.destroy();
+      throw error;
+    }
     socket.on('data', createDecoder((err, msg) => {
-      if (err) return;
+      if (this.socket !== socket) return;
+      if (err) { this._disconnected(socket); socket.destroy(); return; }
       if (msg?.type === 'client-discovery-request') {
         socket.write(frame({
           type: 'client-discovery-response',
@@ -159,9 +184,8 @@ export class CodexIpcClient {
       }
       if (msg?.type === 'broadcast') {
         const conversationId = msg.params?.conversationId;
-        if (msg.method === 'thread-stream-following-changed' && conversationId && msg.params?.following) {
-          this.owners.set(conversationId, msg.sourceClientId);
-        }
+        // Following only proves that sourceClientId is a subscriber, not the
+        // writer. Owner IDs come exclusively from explicit owner discovery.
         if (msg.method === 'thread-stream-state-changed' && conversationId) {
           this.ingestSnapshot(conversationId, msg.params?.change);
         }
@@ -173,23 +197,49 @@ export class CodexIpcClient {
         waiter.resolve(msg);
       }
     }));
-    socket.on('close', () => {
-      this.clientId = INITIAL_CLIENT_ID;
-      this.socket = null;
-      for (const [id, waiter] of this.pending) {
-        this.pending.delete(id);
-        waiter.reject(new Error('codex-ipc closed'));
-      }
-    });
-    const init = await this.request('initialize', { clientType: 'vscode' });
+    let init;
+    try { init = await this.request('initialize', { clientType: 'vscode' }); }
+    catch (error) { this._disconnected(socket); socket.destroy(); throw error; }
     const assigned = init?.result?.clientId || init?.handledByClientId;
+    if (this.socket !== socket) throw new Error('codex-ipc closed');
     if (init?.resultType !== 'success' || !assigned) {
+      this._disconnected(socket);
+      socket.destroy();
       throw new Error(`codex-ipc initialize failed: ${JSON.stringify(init)}`);
     }
     this.clientId = assigned;
     console.log(`[ipc] connected as ${assigned}`);
     await new Promise((resolve) => setTimeout(resolve, 400));
+    if (this.socket !== socket) throw new Error('codex-ipc closed');
+    // Rediscover, never reuse owner IDs or snapshots from an earlier socket.
+    await Promise.allSettled([...this.desiredFollows].map(async (id) => {
+      await this.findOwner(id);
+      if (this.socket === socket) await this.follow(id, { force: true });
+    }));
     return this;
+  }
+
+  _disconnected(socket) {
+    if (this.socket !== socket) return;
+    this.socket = null;
+    this.clientId = INITIAL_CLIENT_ID;
+    this.connectPromise = null;
+    for (const waiter of this.pending.values()) waiter.reject(new Error('codex-ipc closed'));
+    this.pending.clear();
+    this.owners.clear();
+    this.runtimeByThread.clear();
+    this.followed.clear();
+    for (const [threadId, rows] of this.pendingByThread) {
+      if (rows.length) this.onApprovalCleared?.({ threadId, ids: rows.flatMap((r) => [r.id, r.itemId]).filter(Boolean), reason: 'disconnected' });
+    }
+    this.pendingByThread.clear();
+    for (const waiter of this.followWaiters.values()) waiter([]);
+    this.followWaiters.clear();
+    this.onDisconnect?.({ reason: 'disconnected' });
+  }
+
+  runtimeStatus(threadId) {
+    return this.runtimeByThread.get(threadId) || { known: false, status: 'unknown', busy: null, source: 'ipc' };
   }
 
   request(method, params, { targetClientId, timeoutMs = 8000 } = {}) {
@@ -216,9 +266,16 @@ export class CodexIpcClient {
           clearTimeout(timer);
           resolve(msg);
         },
-        reject,
+        reject: (error) => { clearTimeout(timer); reject(error); },
       });
-      this.socket.write(frame(payload));
+      try {
+        if (!this.socket?.writable) throw new Error('codex-ipc closed');
+        this.socket.write(frame(payload));
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(requestId);
+        reject(error);
+      }
     });
   }
 
@@ -228,18 +285,23 @@ export class CodexIpcClient {
 
   async findOwner(conversationId, hostId = 'local') {
     await this.ensureConnected();
+    const socket = this.socket;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const discovery = await this.request(
         'thread-owner-discovery',
         { hostId, conversationId },
         { timeoutMs: 5000 },
       );
-      if (discovery?.resultType !== 'error' && discovery?.handledByClientId) {
+      if (this.socket !== socket) throw Object.assign(new Error('codex-ipc connection changed'), { code: 'writer_owner_unknown' });
+      if (discovery?.resultType === 'success' && typeof discovery.handledByClientId === 'string' && discovery.handledByClientId.trim()) {
         this.owners.set(conversationId, discovery.handledByClientId);
         return discovery.handledByClientId;
       }
       this.owners.delete(conversationId);
-      console.log(`[ipc] discovery ${conversationId}: ${discovery?.error || 'no owner'}`);
+      // Only the router's explicit no-client-found result proves absence.
+      if (discovery?.resultType !== 'error' || discovery.error !== 'no-client-found') {
+        throw Object.assign(new Error('thread owner discovery failed or returned an invalid response'), { code: 'writer_owner_unknown' });
+      }
       if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 400));
     }
     return null;
@@ -254,7 +316,7 @@ export class CodexIpcClient {
         conversationId,
         turnStartParams: {
           threadId: conversationId,
-          clientUserMessageId: crypto.randomUUID(),
+          clientUserMessageId: extra.clientUserMessageId ?? crypto.randomUUID(),
           input,
           additionalContext: null,
           ...(collaborationMode ? { collaborationMode } : {}),
@@ -302,7 +364,19 @@ export class CodexIpcClient {
 
   ingestSnapshot(conversationId, change) {
     const state = change?.conversationState || change?.state || null;
-    const requests = Array.isArray(state?.requests) ? state.requests : [];
+    // Delta notifications without a full request list do not clear approvals.
+    if (!state || !Array.isArray(state.requests)) return;
+    const requests = state.requests;
+    const waitingInput = requests.some((row) => row?.method === 'item/tool/requestUserInput' && row.params?.isBlocking !== false);
+    const waitingApproval = requests.some((row) => row?.method?.includes('requestApproval'));
+    // Empty requests do NOT prove idle; Desktop's execution-state shape is not
+    // part of app-server JSON schema, so do not infer it from rollout freshness.
+    this.runtimeByThread.set(conversationId, {
+      known: waitingInput || waitingApproval,
+      status: waitingInput ? 'waiting_user_input' : waitingApproval ? 'waiting_approval' : 'unknown',
+      busy: waitingInput || waitingApproval ? true : null,
+      source: 'ipc',
+    });
     const pending = requests
       .filter((row) => row && (row.method || '').includes('requestApproval'))
       .map((row) => ({
@@ -351,22 +425,24 @@ export class CodexIpcClient {
   }
 
   async follow(conversationId, { force = false } = {}) {
-    await this.ensureConnected();
     if (!conversationId) return [];
+    this.desiredFollows.add(conversationId);
+    await this.ensureConnected();
     if (!force && this.followed.has(conversationId) && this.pendingByThread.has(conversationId)) {
       return this.pendingByThread.get(conversationId) || [];
     }
     this.followed.add(conversationId);
     if (force) this.pendingByThread.delete(conversationId);
+    // Settle an earlier caller instead of leaving an overwritten waiter behind.
+    this.followWaiters.get(conversationId)?.([]);
     const pending = new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        if (this.followWaiters.get(conversationId) === resolve) this.followWaiters.delete(conversationId);
-        resolve(this.pendingByThread.get(conversationId) || []);
-      }, force ? 2200 : 1500);
-      this.followWaiters.set(conversationId, (rows) => {
+      const finish = (rows) => {
         clearTimeout(timer);
+        if (this.followWaiters.get(conversationId) === finish) this.followWaiters.delete(conversationId);
         resolve(rows);
-      });
+      };
+      const timer = setTimeout(() => finish(this.pendingByThread.get(conversationId) || []), force ? 2200 : 1500);
+      this.followWaiters.set(conversationId, finish);
     });
     this.broadcast('thread-stream-following-changed', {
       conversationId,

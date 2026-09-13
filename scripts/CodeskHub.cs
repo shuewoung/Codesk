@@ -21,6 +21,15 @@ internal static class CodeskHub
 
     static Process hubProc;
     static volatile bool exiting;
+    static readonly string launchId = Environment.GetEnvironmentVariable("CODESK_LAUNCH_ID") ?? Guid.NewGuid().ToString("N");
+    static string expectedVersion;
+
+    static System.Collections.IDictionary ParseJson(string json)
+    {
+        var assembly = Assembly.Load("System.Web.Extensions, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31BF3856AD364E35");
+        var type = assembly.GetType("System.Web.Script.Serialization.JavaScriptSerializer", true);
+        return (System.Collections.IDictionary)type.GetMethod("DeserializeObject").Invoke(Activator.CreateInstance(type), new object[] { json });
+    }
 
     [DllImport("user32.dll")]
     static extern bool SetProcessDPIAware();
@@ -50,7 +59,8 @@ internal static class CodeskHub
         {
             if (!created)
             {
-                OpenUrl(HostUrl);
+                Environment.ExitCode = 2;
+                MessageBox.Show("另一个 Codesk 托盘实例已占用互斥锁。本次启动未成功；请确认并退出原托盘后重试。未接管其他实例。", "Codesk 启动冲突");
                 return;
             }
             try
@@ -61,17 +71,23 @@ internal static class CodeskHub
                     MessageBox.Show("安装不完整：找不到 hub 目录。请重新运行安装包。", "Codesk");
                     return;
                 }
-                if (!HubUp()) StartHub(hubDir);
-                for (var i = 0; i < 40 && !HubUp(); i++) Thread.Sleep(250);
+                expectedVersion = Convert.ToString(ParseJson(File.ReadAllText(Path.Combine(hubDir, "package.json")))["version"]);
+                if (string.IsNullOrEmpty(expectedVersion)) throw new Exception("安装版本缺失，拒绝启动。");
+                foreach (var endpoint in System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners())
+                    if (endpoint.Port == Port) throw new Exception("端口 18990 已占用，未接管或停止其他实例。请人工确认后重试。");
+                StartHub(hubDir);
+                for (var i = 0; i < 40 && !HubUp() && hubProc != null && !hubProc.HasExited; i++) Thread.Sleep(250);
                 if (!HubUp())
                 {
-                    MessageBox.Show("Hub 没有起来。", "Codesk");
+                    Environment.ExitCode = 1;
+                    MessageBox.Show("未核验到本次启动的 Hub（版本/launchId/pid 不匹配或启动失败）。未接管其他实例。", "Codesk");
                     return;
                 }
                 Application.Run(new TrayApp());
             }
             catch (Exception ex)
             {
+                Environment.ExitCode = 1;
                 MessageBox.Show(ex.Message, "Codesk");
             }
             finally
@@ -91,7 +107,6 @@ internal static class CodeskHub
         foreach (var guess in new[]
         {
             Path.Combine(ExeDir(), "hub"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Codesk", "hub"),
             Path.GetFullPath(Path.Combine(ExeDir(), "..", "apps", "web-hub")),
         })
         {
@@ -104,14 +119,30 @@ internal static class CodeskHub
     {
         try
         {
-            var req = (HttpWebRequest)WebRequest.Create("http://127.0.0.1:" + Port + "/api/auth/status");
-            req.Timeout = 800;
-            using (var resp = req.GetResponse()) return true;
+            if (hubProc == null || hubProc.HasExited) return false;
+            return MatchesHubStatus(HttpGet("http://127.0.0.1:" + Port + "/api/host/status"), launchId, expectedVersion, hubProc.Id);
         }
         catch
         {
             return false;
         }
+    }
+
+    static bool MatchesHubStatus(string json, string expectedLaunchId, string version, int expectedPid)
+    {
+        try
+        {
+            var status = ParseJson(json);
+            return object.Equals(status["success"], true)
+                && !string.IsNullOrEmpty(expectedLaunchId) && !string.IsNullOrEmpty(version) && expectedPid > 0
+                && Convert.ToString(status["launchId"]) == expectedLaunchId
+                && Convert.ToString(status["version"]) == version
+                && Convert.ToInt32(status["pid"]) == expectedPid
+                && Convert.ToInt32(status["port"]) == Port
+                && !string.IsNullOrEmpty(Convert.ToString(status["instanceId"]))
+                && !string.IsNullOrEmpty(Convert.ToString(status["hubId"]));
+        }
+        catch { return false; }
     }
 
     static string HttpGet(string url)
@@ -138,8 +169,10 @@ internal static class CodeskHub
         if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ONEDESK_RELAY_URL"))
             && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CODESK_RELAY_URL")))
         {
-            psi.EnvironmentVariables["ONEDESK_RELAY_URL"] = "http://hub.codesk.icu:8787";
+            psi.EnvironmentVariables["ONEDESK_RELAY_URL"] = "https://hub.codesk.icu:8787";
         }
+        psi.EnvironmentVariables["CODESK_LAUNCH_ID"] = launchId;
+        psi.EnvironmentVariables["PORT"] = Port.ToString();
         hubProc = Process.Start(psi);
         if (hubProc != null) hubProc.EnableRaisingEvents = true;
     }
@@ -158,7 +191,6 @@ internal static class CodeskHub
         foreach (var exe in new[]
         {
             Path.Combine(ExeDir(), "node", "node.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Codesk", "node", "node.exe"),
         })
         {
             try

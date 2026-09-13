@@ -28,7 +28,11 @@ function isHubUpgradeRequest(req) {
 }
 
 function forwardedHeaders(req) {
-  const headers = { ...req.headers, host: `${HUB_HOST}:${HUB_PORT}` };
+  const headers = { ...req.headers };
+  const incomingHost = String(req.headers.host || '').trim();
+  if (incomingHost && !headers['x-forwarded-host']) {
+    headers['x-forwarded-host'] = incomingHost;
+  }
   if (!headers['x-forwarded-for']) {
     headers['x-forwarded-for'] = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
   }

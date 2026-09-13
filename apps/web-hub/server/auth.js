@@ -3,7 +3,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export const COOKIE_NAME = 'onedesk_session';
-export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Browser cookie retention only; device tokens have no server-side expiry.
+export const SESSION_TTL_MS = 400 * 24 * 60 * 60 * 1000;
 
 const PUBLIC = new Map([
   ['GET /api/auth/status', true],
@@ -64,7 +65,9 @@ export function parseCookies(header) {
     if (idx < 0) continue;
     const key = part.slice(0, idx).trim();
     const value = part.slice(idx + 1).trim();
-    if (key) out[key] = decodeURIComponent(value);
+    if (key) {
+      try { out[key] = decodeURIComponent(value); } catch { return null; }
+    }
   }
   return out;
 }
@@ -158,16 +161,44 @@ export function isTrustedLocalReq(req, port = 18990) {
   }
 }
 
-export function createAuth({ dataDir, env = process.env, now = () => Date.now(), port = 18990 } = {}) {
+// Fixed-window, bounded in-memory limiter. Only trust the transport peer address;
+// forwarded headers are attacker-controlled unless a separate proxy policy exists.
+export function createLoginLimiter({ now = () => Date.now(), maxAttempts = 10, windowMs = 60_000, maxKeys = 4096 } = {}) {
+  for (const value of [maxAttempts, windowMs, maxKeys]) {
+    if (!Number.isSafeInteger(value) || value < 1) throw new TypeError('invalid login limiter configuration');
+  }
+  const entries = new Map();
+  return {
+    consume(req) {
+      const time = now();
+      for (const [key, row] of entries) if (row.until <= time) entries.delete(key);
+      const key = String(req?.socket?.remoteAddress || 'unknown').replace(/^::ffff:/i, '');
+      let row = entries.get(key);
+      const denied = (until) => ({ ok: false, status: 429, code: 'rate_limited', retryAfterSec: Math.max(1, Math.ceil((until - time) / 1000)) });
+      if (!row) {
+        // Do not evict active buckets: cycling identities must not reset limits.
+        if (entries.size >= maxKeys) return denied(Math.min(...[...entries.values()].map((entry) => entry.until)));
+        row = { count: 0, until: time + windowMs };
+        entries.set(key, row);
+      }
+      if (row.count >= maxAttempts) return denied(row.until);
+      row.count++;
+      return { ok: true };
+    },
+  };
+}
+
+export function createAuth({ dataDir, env = process.env, now = () => Date.now(), port = 18990, loginLimiter = createLoginLimiter({ now }) } = {}) {
   fs.mkdirSync(dataDir, { recursive: true });
   const resolved = resolvePassword({ dataDir, env });
   const sessionsFile = path.join(dataDir, 'sessions.json');
   const sessions = new Map();
+  const sockets = new Map();
 
   function persist() {
     const list = [];
     for (const [token, row] of sessions) {
-      if (row.expiresAt > now()) list.push({ token, expiresAt: row.expiresAt });
+      list.push({ token, ...row });
     }
     try {
       fs.writeFileSync(sessionsFile, `${JSON.stringify(list)}\n`, { encoding: 'utf-8', mode: 0o600 });
@@ -179,11 +210,15 @@ export function createAuth({ dataDir, env = process.env, now = () => Date.now(),
     const raw = JSON.parse(fs.readFileSync(sessionsFile, 'utf-8'));
     if (Array.isArray(raw)) {
       for (const row of raw) {
-        if (row && row.token && row.expiresAt > now()) sessions.set(row.token, { expiresAt: row.expiresAt });
+        if (row && row.token && (row.expiresAt === null || row.expiresAt > now())) {
+          sessions.set(row.token, { id: row.id || crypto.randomUUID(), expiresAt: null });
+        }
       }
     }
   } catch {
   }
+
+  persist(); // Migrate still-valid legacy sessions without reviving expired credentials.
 
   function isSecureRequest(req) {
     if (req?.socket?.encrypted) return true;
@@ -194,7 +229,7 @@ export function createAuth({ dataDir, env = process.env, now = () => Date.now(),
     if (!token) return false;
     const row = sessions.get(token);
     if (!row) return false;
-    if (row.expiresAt <= now()) {
+    if (row.expiresAt !== null && row.expiresAt <= now()) {
       sessions.delete(token);
       persist();
       return false;
@@ -213,6 +248,7 @@ export function createAuth({ dataDir, env = process.env, now = () => Date.now(),
 
   function readPresentedSecret(req) {
     const cookies = parseCookies(req?.headers?.cookie);
+    if (cookies === null) return { cookie: '', bearer: '', invalid: true };
     const authz = String(req?.headers?.authorization || '');
     const bearer = authz.replace(/^Bearer\s+/i, '').trim();
     return {
@@ -225,12 +261,15 @@ export function createAuth({ dataDir, env = process.env, now = () => Date.now(),
     if (isTrustedLocalReq(req, port)) return true;
     if (!resolved.password) return false;
     const presented = readPresentedSecret(req);
+    if (presented.invalid) return false;
     if (validSession(presented.cookie) || validSession(presented.bearer)) return true;
     if (presented.bearer && safeEqualString(presented.bearer, resolved.password)) return true;
     return false;
   }
 
   function login(plain, req, extras = []) {
+    const limit = loginLimiter.consume(req);
+    if (!limit.ok) return limit;
     const password = String(plain || '').trim();
     if (!password) {
       return { ok: false };
@@ -243,7 +282,7 @@ export function createAuth({ dataDir, env = process.env, now = () => Date.now(),
       return { ok: false };
     }
     const token = crypto.randomBytes(32).toString('hex');
-    sessions.set(token, { expiresAt: now() + SESSION_TTL_MS });
+    sessions.set(token, { id: crypto.randomUUID(), expiresAt: null });
     persist();
     return {
       ok: true,
@@ -259,15 +298,49 @@ export function createAuth({ dataDir, env = process.env, now = () => Date.now(),
 
   function logout(req) {
     const presented = readPresentedSecret(req);
-    if (presented.cookie) sessions.delete(presented.cookie);
-    if (presented.bearer) sessions.delete(presented.bearer);
+    revokeToken(presented.cookie);
+    revokeToken(presented.bearer);
     persist();
     return {
       'Set-Cookie': cookieHeader('', { maxAgeSec: 0, secure: isSecureRequest(req) }),
     };
   }
 
+  function revokeToken(token) {
+    if (!token) return;
+    sessions.delete(token);
+    for (const ws of sockets.get(token) || []) {
+      ws.revoked = true;
+      try { ws.close(4403, 'revoked'); } catch { /* continue revoking other sockets */ }
+    }
+    sockets.delete(token);
+    persist();
+  }
+
+  function sessionToken(req) {
+    const presented = readPresentedSecret(req);
+    return [presented.cookie, presented.bearer].find((token) => validSession(token)) || '';
+  }
+
+  function trackSocket(req, ws) {
+    const token = sessionToken(req);
+    if (!token) return '';
+    const set = sockets.get(token) || new Set();
+    set.add(ws);
+    sockets.set(token, set);
+    ws.on('close', () => { set.delete(ws); if (!set.size) sockets.delete(token); });
+    return sessions.get(token).id;
+  }
+
   return {
+    trackSocket,
+    listDevices: () => [...sessions].map(([token, row]) => ({ id: row.id, kind: 'lan', online: Boolean(sockets.get(token)?.size) })),
+    revokeDevice(id) {
+      for (const [token, row] of sessions) {
+        if (row.id === id) { revokeToken(token); return true; }
+      }
+      return false;
+    },
     authorize,
     login,
     logout,

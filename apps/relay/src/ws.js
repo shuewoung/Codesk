@@ -45,6 +45,8 @@ export class RelayNet {
   attachHub(hubId, ws) {
     const prev = this.hubSockets.get(hubId);
     if (prev && prev.ws && prev.ws !== ws) {
+      prev.ws.revoked = true;
+      this.meta.delete(prev.ws);
       try {
         prev.ws.close(4000, 'replaced');
       } catch {
@@ -91,6 +93,8 @@ export class RelayNet {
     const set = this.deviceSockets.get(deviceId);
     if (!set) return;
     for (const ws of set) {
+      ws.revoked = true;
+      this.meta.delete(ws);
       try {
         ws.close(code, reason);
       } catch {
@@ -107,12 +111,16 @@ export class RelayNet {
   }
 
   sendToDevices(hubId, msg) {
+    const target = msg.deviceId;
+    // An invalid or unavailable explicit target must never become a broadcast.
+    if (target != null && (typeof target !== 'string' || !target.trim())) return 0;
     let n = 0;
     for (const [deviceId, set] of this.deviceSockets) {
-      const sample = set.values().next().value;
-      const meta = sample ? this.meta.get(sample) : null;
-      if (!meta || meta.hubId !== hubId) continue;
+      if (target != null && deviceId !== target) continue;
+      if (this.store.getDevice(deviceId)?.revokedAt) continue;
       for (const ws of set) {
+        const meta = this.meta.get(ws);
+        if (ws.revoked || meta?.kind !== 'device' || meta.hubId !== hubId || meta.deviceId !== deviceId) continue;
         if (sendJsonWs(ws, msg)) n += 1;
       }
     }
@@ -197,6 +205,12 @@ export function attachWs(server, { store, audit, net, config, pairLimiter, pushL
     });
 
     async function handleMessage(socket, data) {
+      if (socket.revoked || socket.readyState !== 1) return;
+      const current = net.meta.get(socket);
+      if (current?.kind === 'device' && store.getDevice(current.deviceId)?.revokedAt) {
+        net.closeDevice(current.deviceId);
+        return;
+      }
       const text = Buffer.isBuffer(data) ? data.toString('utf8') : String(data);
       const msg = parseEnvelope(text);
       net.touch(socket);
@@ -207,6 +221,10 @@ export function attachWs(server, { store, audit, net, config, pairLimiter, pushL
         return;
       }
       if (msg.type === 'pong') return;
+
+      if (meta && (msg.type === 'register_hub' || msg.type === 'pair')) {
+        throw new RelayError('bad_envelope', 'connection already authenticated');
+      }
 
       if (msg.type === 'register_hub') {
         const hubId = msg.hubId;
@@ -231,7 +249,7 @@ export function attachWs(server, { store, audit, net, config, pairLimiter, pushL
         }
         const rec = store.createPairCode({
           hubId: meta.hubId,
-          ttlSec: config.pairTtlSec,
+          refresh: msg.payload?.refresh === true,
           hubE2ePub: msg.payload?.hubE2ePub || ''
         });
         sendJsonWs(socket, envelope({
@@ -239,7 +257,7 @@ export function attachWs(server, { store, audit, net, config, pairLimiter, pushL
           hubId: meta.hubId,
           payload: {
             code: rec.code,
-            expiresAtMs: Date.parse(rec.expiresAt)
+            expiresAtMs: rec.expiresAt ? Date.parse(rec.expiresAt) : null
           }
         }));
         return;
@@ -279,7 +297,7 @@ export function attachWs(server, { store, audit, net, config, pairLimiter, pushL
           const out = { v: 1, type: 'fwd', hubId: meta.hubId };
           if (msg.enc) out.enc = msg.enc;
           else out.payload = msg.payload;
-          if (msg.deviceId) out.deviceId = msg.deviceId;
+          out.deviceId = meta.deviceId;
           net.sendToHub(meta.hubId, out);
           console.log(`[relay] fwd phone→hub hubId=${shortId(meta.hubId)} bytes=${bytes}`);
           return;
@@ -289,6 +307,7 @@ export function attachWs(server, { store, audit, net, config, pairLimiter, pushL
           const out = { v: 1, type: 'fwd', hubId: meta.hubId };
           if (msg.enc) out.enc = msg.enc;
           else out.payload = msg.payload;
+          if (msg.deviceId) out.deviceId = msg.deviceId;
           net.sendToDevices(meta.hubId, out);
           console.log(`[relay] fwd hub→phone hubId=${shortId(meta.hubId)} bytes=${bytes}`);
           return;
@@ -333,8 +352,15 @@ export function attachWs(server, { store, audit, net, config, pairLimiter, pushL
         return;
       }
 
-      if (msg.type === 'e2e_hello' || msg.type === 'e2e_welcome') {
+      if (msg.type === 'e2e_hello' || msg.type === 'e2e_welcome' || msg.type === 'error') {
         if (!meta) throw new RelayError('unpaired', 'device token required', 401);
+        if ((meta.kind === 'device' && msg.type !== 'e2e_hello') ||
+            (meta.kind === 'hub' && msg.type === 'e2e_hello')) {
+          throw new RelayError('unauthorized', 'invalid message direction', 403);
+        }
+        if (meta.kind === 'device' && msg.hubId && msg.hubId !== meta.hubId) {
+          throw new RelayError('hub_mismatch', 'hubId does not match this device', 403);
+        }
         const out = {
           v: 1,
           type: msg.type,
@@ -346,11 +372,13 @@ export function attachWs(server, { store, audit, net, config, pairLimiter, pushL
             sendJsonWs(socket, envelope({ type: 'hub_offline', hubId: meta.hubId, payload: {} }));
             return;
           }
+          out.deviceId = meta.deviceId;
           net.sendToHub(meta.hubId, out);
           console.log(`[relay] ${msg.type} phone→hub hubId=${shortId(meta.hubId)}`);
           return;
         }
         if (meta.kind === 'hub') {
+          if (msg.deviceId) out.deviceId = msg.deviceId;
           net.sendToDevices(meta.hubId, out);
           console.log(`[relay] ${msg.type} hub→phone hubId=${shortId(meta.hubId)}`);
           return;

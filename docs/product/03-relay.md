@@ -9,10 +9,10 @@
 - TLS（前面可挂 Caddy/Nginx）
 - 邀请额度（目标 200–300 个 `hubId`）
 - Hub 出站长连接登记：`hubId → socket`
-- 设备配对：兑换一次性码 → `deviceToken`
+- 设备配对：使用长期配对码 → `deviceToken`
 - 转发：校验 token 后把 `enc`（或不透明 `payload`）送到该 `hubId`。禁止解密、禁止当 JSON 打开业务字段
 - 心跳；Hub 掉线则告诉手机 `hub_offline`
-- 托管与 Hub 相同的 Web 静态文件（默认 `apps/web/`，可用 `RELAY_WEB_ROOT` 覆盖）
+- 托管与 Hub 相同的 Web 静态文件（默认 `apps/mobile/dist-web`，可用 `RELAY_WEB_ROOT` 覆盖）
 - 审计：谁在何时连了哪个 `hubId`（不记消息正文）
 - 极光代发：Hub `push_register` / `push_send`。Master Secret 只放中继环境变量，不进 APK、不进用户 Hub
 
@@ -38,7 +38,7 @@
 ## 安全底线
 
 - 全站 HTTPS/WSS
-- 配对码短效、一次性、可吊销
+- 配对码长期有效、可重复配对、手动吊销；已配对设备凭证独立撤销，不做定时轮换
 - 日志默认不打印 `payload` / `enc.ct`
 - 出门 `fwd` 必须是密文（见 [06-e2e.md](06-e2e.md)）。运营者不能打开业务 JSON。不要宣传「连元数据也没有」
 

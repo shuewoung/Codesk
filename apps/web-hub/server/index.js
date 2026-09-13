@@ -1,5 +1,7 @@
 import http from 'http';
+import net from 'node:net';
 import fs from 'fs';
+import { StringDecoder } from 'node:string_decoder';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
@@ -9,17 +11,29 @@ import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 import { WebSocketServer } from 'ws';
 import webpush from 'web-push';
-import { CodexAppServer, isNoActiveTurnError, isWriterLockError, normalizeDecision, normalizeInput } from './appserver.js';
-import { getIpcClient, overlayPendingWithLive } from './ipc-client.js';
+import { CodexAppServer, accessModeToThreadSettings, isNoActiveTurnError, isWriterLockError, normalizeDecision, normalizeInput, CODEX_BIN_SELECTION, DEFAULT_CODEX_EXE } from './appserver.js';
+import { logCodexRuntimeSelection, REPO_CODEX_BIN_DIR } from './codex-bin.js';
+import { cleanupOrphanCodexProcesses, selectForeignCodexProcesses, snapshotWindowsProcesses } from './orphan-cleanup.js';
+import { getIpcClient, overlayPendingWithLive, CODEX_IPC_PIPE } from './ipc-client.js';
+import { discoverThreadOwner, routeWriterSend, handleForceClearWriterLock, writerSafetyError } from './writer-safety.js';
 import { createAuth, corsHeaders, isLoopbackAddress, isPublicApi, isForwardedRequest } from './auth.js';
 import { defaultDataDir, loadOrCreateIdentity, loadRelayConfig } from './identity.js';
 import { createRelayClient, pairLandingUrl } from './relay-client.js';
 import { spawnCommand, runGitReadonly } from './local-cmd.js';
+import { createPtyHub } from './pty.js';
 import { createPluginStore } from './plugins.js';
 import { listArtifactFiles, searchWorkspaceFiles } from './workspace-files.js';
+import { normalizeHistoryItem, deduplicateHistory, summarizeHistory } from './history-items.js';
+import { createFileAccess, correlationFields, fileMetadata, readBoundedFile } from './file-access.js';
+import { createDownloadManager } from './file-download.js';
+import { collectArtifacts, readArtifactItems } from './file-artifacts.js';
+import { buildDirectoryHtml, buildGateHtml, pickRawServePath, rawPreviewHeaders, requestWantsHtml, resolveRequestedPath } from './file-raw.js';
 import { isQuotaError, isQuotaExhausted, quotaExhaustedMessage } from './quota-msg.js';
 import { createGoalsStore } from './goals.js';
-import { APPROVAL_TTL_MS, commandFromFunctionCall, inspectRolloutTail, isNonUserThreadRecord, parseThreadSpawn, resolveLiveStatus, snapshotParseState, threadLooksLive } from './turn-status.js';
+import { APPROVAL_TTL_MS, commandFromFunctionCall, inspectRolloutTail, isNonUserThreadRecord, keepHistoryItemPayload, parseThreadSpawn, resolveLiveStatus, snapshotParseState, threadIdFromRolloutName, threadLooksLive } from './turn-status.js';
+import { parseIdleReleaseConfig, shouldReleaseIdleWriterLocks } from './idle-release.js';
+import { createWorkbench } from './workbench.js';
+import { getHandoffCapabilities, handoffThread } from './writer-handoff.js';
 import {
   applyPinsToGlobalState,
   archiveRecordToLine,
@@ -44,6 +58,10 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
+
+const HOST_INSTANCE = { version: require('../package.json').version, build: process.env.CODESK_BUILD || require('../package.json').version, launchId: process.env.CODESK_LAUNCH_ID || '', instanceId: crypto.randomUUID(), pid: process.pid };
+const relayDownloadPeers = new Map();
+const downloadManagers = new WeakMap();
 
 const PORT = Number(process.env.PORT) || 18990;
 const EXPO_WEB_PORT = Number(process.env.CODESK_EXPO_WEB_PORT) || 18991;
@@ -85,17 +103,17 @@ function resolvePublicDir() {
   const candidates = [
     // Expo Web 导出（电脑浏览器与 APK 同一套 UI）
     path.join(__dirname, '..', '..', 'mobile', 'dist-web'),
+    // 打包场景：pack-hub.ps1 会把 Expo 导出产物复制为 hub/public
     path.join(__dirname, '..', 'public'),
     path.join(path.dirname(process.execPath), 'public'),
     path.join(process.cwd(), 'public'),
     path.join(process.cwd(), 'apps', 'mobile', 'dist-web'),
-    // 旧 PWA，导出未生成时回退
-    path.join(__dirname, '..', '..', 'web'),
-    path.join(process.cwd(), 'apps', 'web'),
   ];
   for (const dir of candidates) {
     if (fs.existsSync(path.join(dir, 'index.html'))) return dir;
   }
+  // 旧 PWA 已归档（archive/web、archive/web-hub-public），Expo Web 是唯一前端
+  console.warn(`[static] 未找到 Web 前端目录，请先执行 cd apps/mobile && npm run export:web。回退到 ${candidates[0]}`);
   return candidates[0];
 }
 const PUBLIC_DIR = resolvePublicDir();
@@ -116,10 +134,18 @@ const AUTH_JSON_PATH = path.join(CODEX_HOME, 'auth.json');
 const HISTORY_LIMIT = 250; // 服务端保留的尾部消息窗口大小
 const FULL_HISTORY_LIMIT = 2000; // all=true 全量加载上限（配合前端渐进渲染）
 const ACCOUNT_QUOTA_TTL_MS = 60 * 1000;
+// Hub 空闲写锁自动释放：HUB_IDLE_RELEASE_HOURS（默认 4，0 禁用）/ HUB_DAILY_RELEASE_AT（"HH:MM" 每日一次，默认禁用）
+const IDLE_RELEASE_CONFIG = parseIdleReleaseConfig(process.env);
 const DATA_DIR = defaultDataDir(process.env);
 const identity = loadOrCreateIdentity(DATA_DIR);
 const auth = createAuth({ dataDir: DATA_DIR, env: process.env, port: PORT });
 const liveCommands = new Map();
+const ptyHub = createPtyHub();
+function ptySend(ws, payload) {
+  try {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify(payload));
+  } catch { /* ignore */ }
+}
 const LAN_CODE_FILE = path.join(DATA_DIR, 'lan-code');
 const LAN_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 function randomLanCode() {
@@ -154,6 +180,9 @@ if (auth.generated && auth.generatedPassword) {
   console.log(`[auth] 已生成本机口令，保存在 ${auth.passwordFile}`);
   console.log(`[auth] 口令: ${auth.generatedPassword}`);
 }
+console.log(`[Idle Release] enabled=${IDLE_RELEASE_CONFIG.enabled} idleHours=${IDLE_RELEASE_CONFIG.idleHours}${IDLE_RELEASE_CONFIG.idleHours > 0 ? '' : ' (off)'} dailyAt=${IDLE_RELEASE_CONFIG.dailyAt || 'off'}`);
+// 打印所选 codex 目录与 codex.exe --version（一次性子进程 + 超时，失败仅告警不阻塞启动）
+logCodexRuntimeSelection({ selection: CODEX_BIN_SELECTION, codexExe: DEFAULT_CODEX_EXE });
 
 const relayConfig = loadRelayConfig(DATA_DIR, process.env);
 const relay = createRelayClient({
@@ -163,17 +192,24 @@ const relay = createRelayClient({
   onFwd(envelope) {
     const payload = envelope?.payload;
     if (!payload || typeof payload !== 'object') return;
-    const ws = {
-      readyState: 1,
+    const peerId = envelope.deviceId || '';
+    const ws = relayDownloadPeers.get(peerId) || {
+      get readyState() { return relay.getState().online ? 1 : 3; },
       send(data) {
         const appMsg = typeof data === 'string' ? JSON.parse(data) : data;
-        relay.forwardApp(slimRelayApp(appMsg), { deviceId: envelope.deviceId || null });
+        if (!relay.forwardApp(slimRelayApp(appMsg), { deviceId: envelope.deviceId || null })) throw new Error('中继连接已断开');
       },
     };
-    handleClientMessage(ws, payload);
+    if (payload.type === 'download_file' && !peerId) { ws.send(JSON.stringify({ type: 'download_error', requestId: payload.requestId, code: 'INVALID_REQUEST', error: '下载需要设备身份' })); return; }
+    if (payload.type === 'download_file' || payload.type === 'cancel_download') {
+      if (relayDownloadPeers.size >= 16 && !relayDownloadPeers.has(peerId)) { ws.send(JSON.stringify({ type: 'download_error', requestId: payload.requestId, code: 'BUSY', error: '下载任务过多' })); return; }
+      relayDownloadPeers.set(peerId, ws);
+    }
+    handleClientMessage(ws, payload).finally(() => { if (!downloadManagers.get(ws)?.size) relayDownloadPeers.delete(peerId); });
   },
   onState(s) {
     if (s?.online) flushJpushToRelay();
+    else { for (const peer of relayDownloadPeers.values()) downloadManagers.get(peer)?.close(); relayDownloadPeers.clear(); }
   },
 });
 
@@ -299,7 +335,16 @@ function normalizeEffortId(value) {
   return map[key] || map[raw] || raw;
 }
 
+function configApplicationInfo(saved = null) {
+  return {
+    applicationScope: { model: 'hub_new_turn_request', effort: 'hub_new_turn_request', speed: 'saved_only', desktopFollower: 'execution_owner_settings_unconfirmed', activeTurn: 'unchanged' },
+    confirmation: { saved, executionConfirmed: false },
+    message: `${saved === true ? '配置已保存。' : saved === false ? '配置未保存。' : ''}模型和推理强度将作为本机 Hub 新轮次的请求参数提交，不代表模型已确认采用；活动轮次及 Desktop follower 继承执行端设置，未确认变更。速度仅保存，未确认生效。`,
+  };
+}
+
 function updateCodexConfig(key, value) {
+  if (!['model', 'effort', 'speed', 'permission'].includes(key)) return false;
   try {
     let content = fs.existsSync(CONFIG_TOML_PATH) ? fs.readFileSync(CONFIG_TOML_PATH, 'utf-8') : '';
 
@@ -342,8 +387,10 @@ function updateCodexConfig(key, value) {
 
     fs.writeFileSync(CONFIG_TOML_PATH, content, 'utf-8');
     console.log(`[Config Sync] Updated config.toml setting ${key} = ${value}`);
+    return true;
   } catch (e) {
     console.error('Error updating config.toml:', e);
+    return false;
   }
 }
 
@@ -552,9 +599,8 @@ function refreshRolloutIndex() {
           if (stat.isDirectory()) {
             walk(full);
           } else if (f.endsWith('.jsonl')) {
-            const match = f.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
-            if (match) {
-              const threadId = match[1];
+            const threadId = threadIdFromRolloutName(f);
+            if (threadId) {
               seen.add(threadId);
               const cached = rolloutCache.get(threadId);
               if (cached && cached.path === full && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
@@ -652,14 +698,46 @@ function getActiveLockThreadIds() {
   }
 }
 
+// 幽灵 owner 嫌疑名单：follower 投递 no-client-found 而被丢弃的 owner 记入 ghostOwners，
+// threadLockHolder 对 owners 缓存命中同 id（TTL 内）降级 desktop-stale，避免“桌面在线持锁”横幅常驻。
+// follower 投递成功或本地接管成功时清除；TTL 兜底防误伤重启后的真实桌面。
+const GHOST_OWNER_TTL_MS = 10 * 60 * 1000;
+const ghostOwners = new Map(); // threadId -> { ownerId, at }
+
+function rememberGhostOwner(threadId, ownerId) {
+  if (!threadId || !ownerId) return;
+  ghostOwners.set(threadId, { ownerId: String(ownerId), at: Date.now() });
+}
+
+function clearGhostOwner(threadId, ownerId = null) {
+  const ghost = ghostOwners.get(threadId);
+  if (!ghost) return;
+  if (ownerId != null && ghost.ownerId !== String(ownerId)) return; // 只清同 id 记录，避免误删新幽灵
+  ghostOwners.delete(threadId);
+}
+
+function isGhostOwner(threadId, ownerId) {
+  const ghost = ghostOwners.get(threadId);
+  return !!ghost && !!ownerId && ghost.ownerId === String(ownerId)
+    && Date.now() - ghost.at < GHOST_OWNER_TTL_MS;
+}
+
+// 与前端的固定契约：lockHolder ∈ 'hub' | 'desktop' | 'desktop-stale' | null
 function threadLockHolder(threadId) {
   if (!threadId) return null;
   if (codex?.ownedThreads?.has(threadId)) return 'hub';
   try {
     const ipc = getIpcClient();
-    if (ipc.owners?.get(threadId)) return 'desktop';
+    const ownerId = ipc.owners?.get(threadId);
+    // owners 缓存命中但该 id 刚因 no-client-found 被判幽灵：降级 desktop-stale，不再宣称桌面在线持锁。
+    if (ownerId) return isGhostOwner(threadId, ownerId) ? 'desktop-stale' : 'desktop';
   } catch { /* pipe optional */ }
-  if (getActiveLockThreadIds().has(threadId)) return 'desktop';
+  if (getActiveLockThreadIds().has(threadId)) {
+    // 有锁文件：桌面进程在运行且锁龄未超 STALE 才算桌面持有，否则视为陈旧锁。
+    const age = writerLockAgeMs(threadId);
+    if (isCodexDesktopProcessRunning() && (age == null || age < STALE_WRITER_LOCK_MS)) return 'desktop';
+    return 'desktop-stale';
+  }
   return null;
 }
 
@@ -672,7 +750,8 @@ function listSubagentsForParent(parentId) {
       id,
       title: meta.title || id.slice(0, 8),
       cwd: meta.cwd || '',
-      status: threadLockHolder(id) || (checkThreadIsActivelyWorking(id) ? 'working' : 'idle'),
+      model: meta.model || undefined,
+      status: rolloutParseState.get(id)?.status || meta.status || (checkThreadIsActivelyWorking(id) ? 'working' : 'unknown'),
     });
   }
   return out;
@@ -694,42 +773,19 @@ function writerLockAgeMs(threadId) {
   }
 }
 
-function clearStaleWriterLock(threadId) {
-  const age = writerLockAgeMs(threadId);
-  if (age == null) return false;
-  if (age < STALE_WRITER_LOCK_MS) {
-    console.warn(`[writer-lock] skip clear ${threadId}: lock age ${age}ms < ${STALE_WRITER_LOCK_MS}ms`);
-    return false;
-  }
-  try {
-    fs.unlinkSync(writerLockPath(threadId));
-    console.warn(`[writer-lock] cleared stale lock ${threadId} (age ${age}ms)`);
-    return true;
-  } catch (e) {
-    console.warn(`[writer-lock] clear failed ${threadId}: ${e.message}`);
-    return false;
-  }
-}
-
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function threadIsLive(threadId) {
   if (!threadId) return false;
+  const runtime = codex?.ownedThreads?.has(threadId) ? codex.runtimeStatus?.(threadId) : getIpcClient().runtimeStatus?.(threadId);
+  if (runtime?.known) return runtime.busy === true;
+  if (codex?.ownedThreads?.has(threadId) && runtime?.busy == null) return true;
   const cached = rolloutCache.get(threadId);
   if (cached) return checkThreadIsActivelyWorking(threadId, cached);
   const filePath = findRolloutFilePathFast(threadId);
   return checkThreadIsActivelyWorking(threadId, filePath ? { path: filePath } : null);
-}
-
-async function discoverThreadOwner(ipc, threadId) {
-  try {
-    return await ipc.findOwner(threadId);
-  } catch (error) {
-    console.warn(`[ipc] findOwner failed: ${error.message}`);
-    return null;
-  }
 }
 
 function isNoClientFound(err) {
@@ -746,18 +802,15 @@ function isActiveTurnError(err) {
 async function waitForOwnerOrIdle(ipc, threadId, { timeoutMs = 90000, intervalMs = 500 } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const ownerId = await discoverThreadOwner(ipc, threadId);
-    if (ownerId) return { ownerId, live: true };
-    if (!threadIsLive(threadId)) return { ownerId: null, live: false };
+    const owner = await discoverThreadOwner(ipc, threadId);
+    if (owner.status !== 'none' || !threadIsLive(threadId)) return owner;
     await sleepMs(intervalMs);
   }
-  return {
-    ownerId: await discoverThreadOwner(ipc, threadId),
-    live: threadIsLive(threadId),
-  };
+  return discoverThreadOwner(ipc, threadId);
 }
 
 async function sendViaFollower(ipc, threadId, input, isSteer, ownerId, extra = {}) {
+  if (extra.queueOnly) { await ipc.startTurn(threadId, input, ownerId, extra); return 'send'; }
   if (isSteer) {
     try {
       await ipc.steerTurn(threadId, input, ownerId);
@@ -783,17 +836,53 @@ async function sendViaFollower(ipc, threadId, input, isSteer, ownerId, extra = {
 async function tryFollowerSend(ipc, threadId, input, isSteer, ownerId, extra = {}) {
   try {
     const action = await sendViaFollower(ipc, threadId, input, isSteer, ownerId, extra);
+    clearGhostOwner(threadId); // follower 投递成功：此前的幽灵嫌疑解除
     return { ok: true, action };
   } catch (err) {
     ipc.forgetOwner(threadId);
     if (!isNoClientFound(err)) throw err;
+    rememberGhostOwner(threadId, ownerId); // no-client-found：owner 进入幽灵嫌疑名单
     console.warn(`[ipc] no-client-found, drop owner ${ownerId} for ${threadId}`);
     return { ok: false, action: isSteer ? 'steer' : 'send' };
   }
 }
 
+// follower 通道 no-client-found 后的本地接管（send_stop / send_approval 共用）：
+// ensureStarted + resumeThread，resume 成功即 Hub 持锁并清除幽灵记录；
+// resume 撞上 writer 锁按 writer_lock_conflict 上报（保留前端强制删锁路径），绝不在这里删锁。
+async function takeoverThreadAfterNoClient(threadId, via) {
+  const client = getCodex();
+  if (client.ownedThreads.has(threadId)) {
+    clearGhostOwner(threadId);
+    return client;
+  }
+  await client.ensureStarted();
+  try {
+    await client.resumeThread(threadId);
+  } catch (error) {
+    if (isWriterLockError(error)) {
+      console.warn(`[Remote Action] takeover-after-no-client lock-conflict threadId=${threadId} via=${via}`);
+      throw writerSafetyError('writer_lock_conflict', '会话写入锁仍被占用，已避免接管；确认桌面已关闭后可强制清锁');
+    }
+    throw error;
+  }
+  clearGhostOwner(threadId);
+  console.log(`[Remote Action] takeover-after-no-client threadId=${threadId} via=${via}`);
+  touchHubWriteActivity(); // 接管成功即取得写入权：重置空闲释放计时
+  broadcastLockHolderChange(threadId); // lockHolder → 'hub' 不伴随 rollout 文件变化，主动推送防旧横幅残留
+  return client;
+}
+
+// 本地审批分支（owner-none 与 no-client 接管共用）：requestId 未命中再按 threadId 兜底。
+function decideApprovalLocally(client, threadId, requestId, decision) {
+  let r = client.decideApproval(requestId, decision);
+  if (!r.ok && r.code === 'not_found') r = client.decideApproval(threadId, decision);
+  return r;
+}
+
 async function sendLocalUserOrSteer(client, threadId, text, input, isSteer, extra = {}) {
   const liveTurn = client.currentTurnByThread.get(threadId) || null;
+  if (extra.queueOnly && liveTurn) throw writerSafetyError('thread_busy', 'Queued send refused because a turn became active');
   if (liveTurn) {
     try {
       await client.steerTurn({
@@ -801,6 +890,7 @@ async function sendLocalUserOrSteer(client, threadId, text, input, isSteer, extr
         text,
         input,
         expectedTurnId: liveTurn,
+        clientUserMessageId: extra.clientUserMessageId,
       });
       return 'steer';
     } catch (err) {
@@ -811,27 +901,19 @@ async function sendLocalUserOrSteer(client, threadId, text, input, isSteer, extr
   } else if (isSteer) {
     console.warn(`[Remote Action] steer requested without live turn, start new: ${threadId}`);
   }
+  const cfg = readCodexConfig();
+  const selectedModel = cfg.rawModel ?? cfg.model ?? null;
+  const selectedEffort = cfg.rawEffort ?? cfg.effort ?? null;
   await client.sendUserTurn({
     threadId,
     text,
     input,
+    model: selectedModel && selectedModel !== 'default' ? selectedModel : null,
+    effort: selectedEffort && selectedEffort !== 'default' ? selectedEffort : null,
     collaborationMode: extra.collaborationMode || extra.mode || null,
+    clientUserMessageId: extra.clientUserMessageId,
   });
   return 'send';
-}
-
-async function resumeLocalWriter(client, threadId) {
-  try {
-    await client.resumeThread(threadId);
-    return;
-  } catch (e) {
-    if (!isWriterLockError(e)) throw e;
-    if (threadIsLive(threadId)) throw e;
-    const ownerId = await discoverThreadOwner(getIpcClient(), threadId);
-    if (ownerId) throw e;
-    if (!clearStaleWriterLock(threadId)) throw e;
-    await client.resumeThread(threadId);
-  }
 }
 
 function rolloutLooksLive(rolloutInfo) {
@@ -1101,6 +1183,7 @@ function getThreadList() {
     rawThreads.push({
       id: threadId,
       title,
+      summary: rolloutParseState.has(threadId) ? { ...summarizeHistory(rolloutParseState.get(threadId).items), partial: rolloutParseState.get(threadId).totalItems > rolloutParseState.get(threadId).items.length } : undefined,
       updatedAt: sortMs ? new Date(sortMs).toISOString() : new Date().toISOString(),
       mtimeMs: sortMs,
       isActive: isActiveWorking,
@@ -1195,6 +1278,7 @@ function getThreadList() {
 // - JSONL 是 append-only 的，只读取自上次解析以来的新增字节
 // - rev 是已处理行数的版本号，用于客户端 delta 合并与 unchanged 短路
 const rolloutParseState = new Map();
+const olderHistoryCache = new Map(); // Two LRU windows; never replace the live delta state.
 const lastHttpHistoryMeta = new Map();
 const lanClients = new Map();
 const approvalClosedIds = new Map(); // threadId -> Set(requestId)
@@ -1216,6 +1300,7 @@ function createEmptyParseState(itemCap = HISTORY_LIMIT * 2) {
     tokenUsage: {},
     activeActionText: '',
     restBytes: '',
+    decoder: new StringDecoder('utf8'),
     openCalls: new Map()
   };
 }
@@ -1274,6 +1359,11 @@ function processRolloutLine(entry, state) {
     if (state.openCalls) state.openCalls.clear();
     // 记录任务完成时间（rollout 行内 timestamp，如 2026-08-15T08:29:45.563Z）
     state.completedAt = entry.timestamp || payload.timestamp || null;
+  } else if (payloadType === 'turn_aborted' || payloadType === 'task_interrupted') {
+    state.status = 'interrupted';
+    state.activeActionText = '';
+    state.pendingApproval = null;
+    state.openCalls?.clear();
   } else if (payloadType === 'token_count') {
     if (payload.rate_limits) {
       if (payload.rate_limits.primary) {
@@ -1299,11 +1389,6 @@ function processRolloutLine(entry, state) {
       }
     }
   } else if (topType === 'response_item' || topType === 'event_msg') {
-    state.items.push(payload);
-    if (state.items.length > state.itemCap) {
-      state.items.splice(0, state.items.length - state.itemCap);
-    }
-    state.totalItems++;
     if (payloadType === 'custom_tool_call' || payloadType === 'tool_call') {
       state.status = 'working';
       const inputStr = typeof payload.input === 'string' ? payload.input : JSON.stringify(payload.input || {});
@@ -1328,6 +1413,19 @@ function processRolloutLine(entry, state) {
     } else if (payloadType === 'reasoning' || payloadType === 'agent_reasoning') {
       state.status = 'working';
       state.activeActionText = '正在深度思考与推理中...';
+    }
+    if (keepHistoryItemPayload(payloadType)) {
+      const normalized = normalizeHistoryItem(payload, entry.timestamp);
+      if (!normalized) return;
+      if (normalized.completed && state.openCalls) {
+        const ids = [normalized.id, normalized.call_id].filter(Boolean).map(String);
+        for (const [key, call] of state.openCalls) if (ids.includes(key) || ids.includes(call.id)) state.openCalls.delete(key);
+      }
+      state.items.push(normalized);
+      if (state.items.length > state.itemCap) {
+        state.items.splice(0, state.items.length - state.itemCap);
+      }
+      state.totalItems++;
     }
   } else if (
     topType === 'item/commandExecution/requestApproval'
@@ -1468,8 +1566,14 @@ function dropStaleParsedApproval(state, threadId, activeLocks) {
 
 function applyLockOverride(state, activeLocks, threadId, stats, filePath) {
   dropStaleParsedApproval(state, threadId, activeLocks);
-  if (state.status === 'waiting_approval') return;
   const tail = filePath && stats ? inspectRolloutTail(filePath, stats) : { open: false };
+  const runtime = codex?.ownedThreads?.has(threadId) ? codex.runtimeStatus?.(threadId) : getIpcClient().runtimeStatus?.(threadId);
+  if (runtime?.known) {
+    state.status = runtime.status === 'waiting_user_input' ? 'waiting_input' : runtime.status;
+    if (!runtime.busy) { state.activeActionText = ''; state.pendingApproval = null; }
+    return;
+  }
+  if (state.status === 'waiting_approval') return;
   const next = resolveLiveStatus(state.status, {
     hasLiveChildren: hasLiveChildAgents(threadId),
     tail,
@@ -1565,11 +1669,11 @@ function mergeAccountQuota(tokenUsage) {
 }
 
 function packHistoryResult(state, delta, limit = HISTORY_LIMIT, threadId = '') {
-  const items = state.items.length > limit ? state.items.slice(-limit) : state.items;
+  const items = deduplicateHistory(state.items.length > limit ? state.items.slice(-limit) : state.items);
   return {
     items,
     totalItems: state.totalItems,
-    hasMore: state.totalItems > items.length,
+    hasMore: state.totalItems > Math.min(state.items.length, limit),
     status: state.status,
     startedAt: state.startedAt,
     completedAt: state.completedAt,
@@ -1584,17 +1688,40 @@ function packHistoryResult(state, delta, limit = HISTORY_LIMIT, threadId = '') {
   };
 }
 
+function readRolloutIntoState(filePath, stats, state) {
+  const fd = fs.openSync(filePath, 'r');
+  const buf = Buffer.allocUnsafe(256 * 1024);
+  const newItems = [];
+  let added = 0;
+  try {
+    while (state.offset < stats.size) {
+      const count = fs.readSync(fd, buf, 0, Math.min(buf.length, stats.size - state.offset), state.offset);
+      if (!count) break;
+      const lines = (state.restBytes + state.decoder.write(buf.subarray(0, count))).split('\n');
+      state.restBytes = lines.pop() || '';
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t) continue;
+        state.rev++;
+        const before = state.totalItems;
+        try { processRolloutLine(JSON.parse(t), state); } catch {}
+        // items.length stays constant once the retention window fills.
+        if (state.totalItems > before) {
+          added++;
+          if (added <= HISTORY_LIMIT) newItems.push(state.items[state.items.length - 1]);
+        }
+      }
+      state.offset += count;
+    }
+    state.mtimeMs = stats.mtimeMs;
+  } finally { fs.closeSync(fd); }
+  // A truncated delta must not claim the original baseRev.
+  return added > HISTORY_LIMIT ? null : newItems;
+}
+
 function fullParseIntoState(filePath, stats, cap = HISTORY_LIMIT * 2) {
   const fresh = createEmptyParseState(cap);
-  const content = fs.readFileSync(filePath, 'utf-8');
-  for (const line of content.split('\n')) {
-    const t = line.trim();
-    if (!t) continue;
-    fresh.rev++;
-    try { processRolloutLine(JSON.parse(t), fresh); } catch (e) {}
-  }
-  fresh.offset = stats.size;
-  fresh.mtimeMs = stats.mtimeMs;
+  readRolloutIntoState(filePath, stats, fresh);
   return fresh;
 }
 
@@ -1608,12 +1735,20 @@ function parseRolloutHistory(filePath, activeLocks, threadId, pageOptions = {}) 
   try {
     const stats = fs.statSync(filePath);
 
-    // 全量模式（加载更早历史）：独立解析，上限 2000 条，不污染增量缓存
+    // Expand the older window on demand; unchanged retries reuse a bounded LRU.
     if (pageOptions.all) {
-      const fresh = fullParseIntoState(filePath, stats, FULL_HISTORY_LIMIT);
-      const view = snapshotParseState(fresh);
+      const requested = Number(pageOptions.limit);
+      const limit = Number.isSafeInteger(requested) && requested > FULL_HISTORY_LIMIT ? requested : FULL_HISTORY_LIMIT;
+      let cached = olderHistoryCache.get(threadId);
+      if (!cached || cached.path !== filePath || cached.state.offset !== stats.size || cached.state.mtimeMs !== stats.mtimeMs || cached.state.itemCap < limit) {
+        cached = { path: filePath, state: fullParseIntoState(filePath, stats, limit) };
+      }
+      olderHistoryCache.delete(threadId);
+      olderHistoryCache.set(threadId, cached);
+      while (olderHistoryCache.size > 2) olderHistoryCache.delete(olderHistoryCache.keys().next().value);
+      const view = snapshotParseState(cached.state);
       applyLockOverride(view, activeLocks, threadId, stats, filePath);
-      return packHistoryResult(view, null, FULL_HISTORY_LIMIT, threadId);
+      return packHistoryResult(view, null, limit, threadId);
     }
 
     let state = rolloutParseState.get(threadId);
@@ -1636,37 +1771,15 @@ function parseRolloutHistory(filePath, activeLocks, threadId, pageOptions = {}) 
       return packHistoryResult(view, null, HISTORY_LIMIT, threadId);
     }
 
-    // 增量路径：只读取 [offset, size) 的新增字节
-    const readLen = stats.size - state.offset;
-    const fd = fs.openSync(filePath, 'r');
-    const buf = Buffer.alloc(readLen);
-    fs.readSync(fd, buf, 0, readLen, state.offset);
-    fs.closeSync(fd);
-
-    const chunk = state.restBytes + buf.toString('utf-8');
-    const lines = chunk.split('\n');
-    state.restBytes = lines.pop() || ''; // 最后一段可能是被截断的半行，留待下次拼接
-
-    const newItems = [];
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t) continue;
-      state.rev++;
-      const prevLen = state.items.length;
-      try { processRolloutLine(JSON.parse(t), state); } catch (e) {}
-      if (state.items.length > prevLen) {
-        newItems.push(state.items[state.items.length - 1]);
-      }
-    }
-    state.offset = stats.size;
-    state.mtimeMs = stats.mtimeMs;
+    // Same bounded reader on cold/incremental paths, preserving partial UTF-8 lines.
+    const newItems = readRolloutIntoState(filePath, stats, state);
     rolloutParseState.set(threadId, state);
 
     const view = snapshotParseState(state);
     applyLockOverride(view, activeLocks, threadId, stats, filePath);
     return packHistoryResult(
-      state,
-      newItems.length > 0 ? { baseRev, newItems: newItems.slice(-HISTORY_LIMIT) } : null,
+      view,
+      newItems?.length > 0 ? { baseRev, newItems } : null,
       HISTORY_LIMIT,
       threadId
     );
@@ -2012,6 +2125,62 @@ function isCodexDesktopProcessRunning() {
   return running;
 }
 
+// force-clear 护栏的“持有者存活”检测：桌面 ChatGPT.exe/Codex.exe（复用
+// isCodexDesktopProcessRunning），或除 Hub 自身子进程树外的任何 codex.exe。
+// 结果短暂缓存（2.5s），避免高频强删请求反复拉 CIM 快照。
+let holderAliveCache = { at: 0, alive: false, probed: false };
+function isWriterLockHolderProcessAlive() {
+  const now = Date.now();
+  if (holderAliveCache.probed && now - holderAliveCache.at < 2500) return holderAliveCache.alive;
+  let alive = false;
+  try {
+    alive = isCodexDesktopProcessRunning()
+      || selectForeignCodexProcesses(snapshotWindowsProcesses(), process.pid).length > 0;
+  } catch {
+    alive = isCodexDesktopProcessRunning();
+  }
+  holderAliveCache = { at: now, alive, probed: true };
+  return alive;
+}
+
+let codexPipeCache = { at: 0, exists: false };
+
+// 探测 codex-ipc 命名管道是否有服务端在监听（约 3s 缓存，模式同 desktopProcCache）。
+function codexPipeExists(pipePath = CODEX_IPC_PIPE) {
+  const now = Date.now();
+  if (pipePath === CODEX_IPC_PIPE && now - codexPipeCache.at < 3000) {
+    return Promise.resolve(codexPipeCache.exists);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    let socket = null;
+    let timer = null;
+    const finish = (exists) => {
+      if (settled) return;
+      settled = true;
+      if (pipePath === CODEX_IPC_PIPE) codexPipeCache = { at: Date.now(), exists };
+      if (timer) clearTimeout(timer);
+      if (socket) socket.destroy();
+      resolve(exists);
+    };
+    try {
+      socket = net.createConnection({ path: pipePath });
+      timer = setTimeout(() => finish(false), 2000);
+      timer.unref?.();
+      socket.once('connect', () => finish(true));
+      socket.once('error', () => finish(false));
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+// 桌面“确实不在”：进程列表查不到 Codex/ChatGPT，且 codex-ipc 管道也没有监听者。
+// 只有此时才允许把 unknown 的持锁发现当作 none 处理（本地接管）。
+async function isDesktopAbsent() {
+  return !isCodexDesktopProcessRunning() && !(await codexPipeExists());
+}
+
 async function desktopMetadataIdle() {
   // global-state / sqlite 是 Desktop 自己的 UI 存储；进程还在时写入会被下次 persist 盖掉，也更接近活锁。
   if (isCodexDesktopProcessRunning()) {
@@ -2022,8 +2191,11 @@ async function desktopMetadataIdle() {
     const age = writerLockAgeMs(lockedId);
     if (age != null && age < STALE_WRITER_LOCK_MS) {
       if (threadIsLive(lockedId)) return { idle: false, reason: 'live_turn' };
-      const ownerId = await discoverThreadOwner(getIpcClient(), lockedId).catch(() => null);
-      if (ownerId) return { idle: false, reason: 'owner' };
+      const owner = await discoverThreadOwner(getIpcClient(), lockedId);
+      if (owner.status === 'none') continue;
+      // 桌面已关（无进程且无 pipe）时 discovery 只会得到 unknown：不能让元数据物化永久不 idle。
+      if (owner.status === 'unknown' && await isDesktopAbsent()) continue;
+      return { idle: false, reason: owner.status === 'unknown' ? 'owner_unknown' : 'owner' };
     }
   }
   return { idle: true, reason: 'idle' };
@@ -2307,6 +2479,8 @@ function sendBuffer(req, res, statusCode, contentType, data, extraHeaders = {}) 
 }
 
 function sendJson(req, res, statusCode, obj, extraHeaders = {}) {
+  const query = Object.fromEntries(new URL(req.url, 'http://localhost').searchParams);
+  obj = { ...obj, ...correlationFields(query, req.url.startsWith('/api/upload')) };
   sendBuffer(
     req,
     res,
@@ -2402,6 +2576,7 @@ function handleHostApi(req, res, reqUrl) {
       sendJson(req, res, 200, {
         success: true,
         hubId: identity.hubId,
+        ...HOST_INSTANCE,
         port: PORT,
         relay: relayPublicState(),
         lanCount: [...lanClients.values()].filter((ws) => !isLoopbackIp(ws.clientIp)).length,
@@ -2415,10 +2590,10 @@ function handleHostApi(req, res, reqUrl) {
     });
     return;
   }
-  if (reqUrl.pathname === '/api/host/pair-code' && req.method === 'GET') {
+  if (reqUrl.pathname === '/api/host/pair-code' && (req.method === 'GET' || req.method === 'POST')) {
     (async () => {
       try {
-        const pair = await relay.requestPairCode();
+        const pair = await relay.requestPairCode(8000, req.method === 'POST' || reqUrl.searchParams.get('refresh') === '1');
         sendJson(req, res, 200, {
           success: true,
           code: pair.code,
@@ -2439,12 +2614,15 @@ function handleHostApi(req, res, reqUrl) {
       const lan = [...lanClients.values()]
         .filter((ws) => !isLoopbackIp(ws.clientIp))
         .map((ws) => ({
-          id: ws.clientId,
+          id: ws.deviceId || ws.clientId,
           kind: 'lan',
           ip: ws.clientIp || '',
           connectedAt: ws.connectedAt || null,
           online: ws.readyState === 1,
         }));
+      for (const device of auth.listDevices()) {
+        if (!lan.some((row) => row.id === device.id)) lan.push(device);
+      }
       let devices = [];
       try {
         const listed = await relay.listDevices();
@@ -2479,6 +2657,7 @@ function handleHostApi(req, res, reqUrl) {
         const id = String(parsed.id || parsed.deviceId || '').trim();
         if (!id) return sendJson(req, res, 400, { success: false, error: '缺少 id' });
         if (kind === 'lan') {
+          if (auth.revokeDevice(id)) return sendJson(req, res, 200, { success: true });
           const ws = lanClients.get(id);
           if (!ws) return sendJson(req, res, 404, { success: false, error: '局域网客户端不在线' });
           try { ws.close(4001, 'kicked'); } catch { /* ignore */ }
@@ -2495,7 +2674,8 @@ function handleHostApi(req, res, reqUrl) {
   }
   if (reqUrl.pathname === '/api/host/shutdown' && req.method === 'POST') {
     sendJson(req, res, 200, { success: true });
-    setTimeout(() => process.exit(0), 200);
+    // 先释放 codex 子进程树（含写锁），响应发出后再退出
+    setTimeout(() => { shutdownHubGracefully('api-shutdown'); process.exit(0); }, 200);
     return;
   }
   if (reqUrl.pathname === '/api/host/lan-code' && req.method === 'POST') {
@@ -2625,7 +2805,9 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'GET' && (reqUrl.pathname === '/' || reqUrl.pathname === '/index.html')) {
     expoWebDevUp((up) => {
-      if (up) {
+      // 仅本机浏览器可 302 到 127.0.0.1:18991。Cloudflare Tunnel / 局域网
+      // 访客跟过去会打到他们自己的电脑，必须继续托管 dist-web / 旧 PWA。
+      if (up && isLoopbackReq(req)) {
         res.writeHead(302, { Location: `${EXPO_WEB_ORIGIN}/`, 'Cache-Control': 'no-store' });
         return res.end();
       }
@@ -2669,6 +2851,7 @@ const server = http.createServer((req, res) => {
         const parsed = JSON.parse(body || '{}');
         const pairCode = relay.getPairCode?.()?.code || '';
         const result = auth.login(parsed.password || parsed.token || parsed.code, req, [pairCode, localLanCode]);
+        if (result.status === 429) return sendJson(req, res, 429, { success: false, code: result.code, error: '登录尝试过多，请稍后重试。', retryAfterSec: result.retryAfterSec }, { 'Retry-After': String(result.retryAfterSec) });
         if (!result.ok) {
           return sendJson(req, res, 401, { success: false, error: '口令错误。请输入电脑主机台上那个码。' });
         }
@@ -2697,12 +2880,35 @@ const server = http.createServer((req, res) => {
   }
 
   if (reqUrl.pathname.startsWith('/api/') && !isPublicApi(reqUrl.pathname, req.method) && !auth.authorize(req)) {
+    if (reqUrl.pathname === '/api/file' && requestWantsHtml(req)) {
+      const html = buildGateHtml({
+        title: '还没有登录',
+        message: 'Cloudflare Tunnel / 局域网打开本机文件需要先在 Codesk 页面输入家里码。登录后再打开这个链接。',
+        actionHref: '/',
+        actionLabel: '去登录',
+      });
+      const buf = Buffer.from(html, 'utf8');
+      res.writeHead(401, {
+        ...corsHeaders(req),
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Length': buf.length,
+        'Cache-Control': 'no-store',
+      });
+      return res.end(buf);
+    }
     return sendJson(req, res, 401, { success: false, error: '未登录' });
+  }
+
+  if (reqUrl.pathname === '/api/thread-writer-lock/force-clear') {
+    if (req.method !== 'POST') {
+      return sendJson(req, res, 405, { ok: false, code: 'method_not_allowed', error: '仅支持 POST' });
+    }
+    return handleForceClearWriterLock(req, res, { codexHome: CODEX_HOME, sendJson, isHolderAlive: isWriterLockHolderProcessAlive });
   }
 
   if (reqUrl.pathname === '/api/auth/pair-code' && req.method === 'GET') {
     (async () => {
-      const pair = await relay.requestPairCode();
+      const pair = await relay.requestPairCode(8000, req.method === 'POST' || reqUrl.searchParams.get('refresh') === '1');
       sendJson(req, res, 200, {
         success: true,
         code: pair.code,
@@ -2855,7 +3061,7 @@ const server = http.createServer((req, res) => {
 
     const rolloutPath = findRolloutFilePathFast(threadId);
     const activeLocks = getActiveLockThreadIds();
-    const history = parseRolloutHistory(rolloutPath, activeLocks, threadId, { all });
+    const history = parseRolloutHistory(rolloutPath, activeLocks, threadId, { all, limit: reqUrl.searchParams.get('limit') });
 
     const baseRevRaw = reqUrl.searchParams.get('baseRev');
     const baseRev = baseRevRaw === null ? NaN : parseInt(baseRevRaw, 10);
@@ -2876,15 +3082,17 @@ const server = http.createServer((req, res) => {
   }
 
   if (reqUrl.pathname === '/api/workspace-tree') {
-    const targetCwd = reqUrl.searchParams.get('cwd');
+    let access;
+    try { access = fileAccessFor(Object.fromEntries(reqUrl.searchParams)); } catch (e) { return sendJson(req, res, 403, { success: false, error: e.message }); }
+    const targetCwd = access.cwd;
     if (!targetCwd || !fs.existsSync(targetCwd)) {
       return sendJson(req, res, 400, { success: false, error: 'Directory does not exist' });
     }
 
     (async () => {
       try {
-        const sub = reqUrl.searchParams.get('path') || targetCwd;
-        const tree = await buildWorkspaceDirectoryTreeAsync(sub, 0, 0);
+        const sub = access.authorize(reqUrl.searchParams.get('path') || targetCwd);
+        const tree = (await buildWorkspaceDirectoryTreeAsync(sub, 0, 0)).filter((f) => access.allows(f.path));
         const rootName = path.basename(path.normalize(targetCwd));
         sendJson(req, res, 200, {
           success: true,
@@ -2900,15 +3108,15 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (reqUrl.pathname === '/api/workspace-search') {
-    const cwd = reqUrl.searchParams.get('cwd') || pickDefaultCwd();
-    const q = reqUrl.searchParams.get('q') || '';
-    return sendJson(req, res, 200, { success: true, cwd, q, hits: searchWorkspaceFiles(cwd, q) });
-  }
-
-  if (reqUrl.pathname === '/api/artifacts') {
-    const cwd = reqUrl.searchParams.get('cwd') || pickDefaultCwd();
-    return sendJson(req, res, 200, { success: true, cwd, files: listArtifactFiles(cwd) });
+  if (reqUrl.pathname === '/api/workspace-search' || reqUrl.pathname === '/api/artifacts') {
+    try {
+      const msg = Object.fromEntries(reqUrl.searchParams);
+      const access = fileAccessFor(msg);
+      const q = msg.q || '';
+      const data = reqUrl.pathname === '/api/artifacts' ? artifactListing(msg.threadId, access)
+        : { q, hits: searchWorkspaceFiles(access.cwd, q).filter((f) => access.allows(f.path)) };
+      return sendJson(req, res, 200, { success: true, cwd: access.cwd, ...data });
+    } catch (e) { return sendJson(req, res, 403, { success: false, error: e.message }); }
   }
 
   if (reqUrl.pathname === '/api/models' && req.method === 'GET') {
@@ -3035,15 +3243,14 @@ const server = http.createServer((req, res) => {
     req.on('data', (chunk) => {
       received += chunk.length;
       if (received > MAX_UPLOAD_BYTES) {
-        req.destroy();
+        chunks.length = 0;
+        if (!res.writableEnded) sendJson(req, res, 413, { success: false, error: '文件超过 20MB' });
         return;
       }
       chunks.push(chunk);
     });
     req.on('end', () => {
-      if (received > MAX_UPLOAD_BYTES) {
-        return sendJson(req, res, 413, { success: false, error: '文件超过 20MB' });
-      }
+      if (received > MAX_UPLOAD_BYTES || res.writableEnded) return;
       try {
         fs.mkdirSync(UPLOAD_DIR, { recursive: true });
         const storedName = `${crypto.randomUUID()}${ext}`;
@@ -3068,75 +3275,111 @@ const server = http.createServer((req, res) => {
       return sendJson(req, res, 400, { success: false, error: 'Missing path parameter' });
     }
 
-    const filePath = resolveRequestedFile(rawPath, reqUrl.searchParams.get('cwd') || '');
+    let access, filePath, resolved;
+    try {
+      access = fileAccessFor(Object.fromEntries(reqUrl.searchParams));
+      filePath = access.authorize(rawPath);
+      resolved = { path: filePath, isDir: fs.statSync(filePath).isDirectory() };
+    } catch (e) { return sendJson(req, res, 403, { success: false, error: e.message }); }
     if (!filePath) {
+      if (requestWantsHtml(req)) {
+        const html = buildGateHtml({
+          title: '找不到这个文件',
+          message: `主机上看不到：${rawPath}`,
+          actionHref: '/',
+          actionLabel: '回到 Codesk',
+        });
+        const buf = Buffer.from(html, 'utf8');
+        res.writeHead(404, {
+          ...corsHeaders(req),
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Length': buf.length,
+          'Cache-Control': 'no-store',
+        });
+        return res.end(buf);
+      }
       return sendJson(req, res, 404, { success: false, error: `File not found on host disk: ${rawPath}` });
     }
+    const isDir = Boolean(resolved?.isDir);
 
     const ext = path.extname(filePath).toLowerCase();
     const rawMime = RAW_IMAGE_MIME[ext];
     const isImg = Boolean(rawMime) || ext === '.svg';
-    const wantRaw = reqUrl.searchParams.get('raw') === '1' || reqUrl.searchParams.get('raw') === 'true';
+    const original = reqUrl.searchParams.get('download') === 'original';
+    if (original && isDir) return sendJson(req, res, 400, { success: false, error: '只能下载普通文件' });
+    const wantRaw = original || reqUrl.searchParams.get('raw') === '1' || reqUrl.searchParams.get('raw') === 'true';
 
-    if (wantRaw && rawMime) {
-      fs.stat(filePath, (statErr, st) => {
+    if (wantRaw) {
+      const target = original ? { kind: 'download', path: filePath, mime: 'application/octet-stream' } : pickRawServePath(filePath, isDir);
+      try { target.path = access.authorize(target.path); } catch (e) { return sendJson(req, res, 403, { success: false, error: e.message }); }
+      if (target.kind === 'dir') {
+        const html = buildDirectoryHtml(filePath, access);
+        const buf = Buffer.from(html, 'utf8');
+        res.writeHead(200, {
+          ...corsHeaders(req),
+          'Content-Type': target.mime,
+          ...rawPreviewHeaders(target.mime),
+          'Content-Length': buf.length,
+          'Cache-Control': 'private, max-age=30',
+          'X-Content-Type-Options': 'nosniff',
+        });
+        res.end(buf);
+        return;
+      }
+      fs.stat(target.path, (statErr, st) => {
         if (statErr) {
           return sendJson(req, res, 500, { success: false, error: `Error reading file: ${statErr.message}` });
         }
         if (st.size > FILE_RAW_LIMIT) {
-          return sendJson(req, res, 413, { success: false, error: '图片过大，请点开预览' });
+          return sendJson(req, res, 413, { success: false, error: '文件过大，请点开预览' });
         }
-        fs.readFile(filePath, (readErr, buffer) => {
+        readBoundedFile(target.path, FILE_RAW_LIMIT, access, (readErr, buffer) => {
           if (readErr) {
             return sendJson(req, res, 500, { success: false, error: `Error reading file: ${readErr.message}` });
           }
-          res.writeHead(200, {
+          const headers = {
             ...corsHeaders(req),
-            'Content-Type': rawMime,
+            'Content-Type': target.mime,
+          ...rawPreviewHeaders(target.mime),
             'Content-Length': buffer.length,
             'Cache-Control': 'private, max-age=120',
             'X-Content-Type-Options': 'nosniff',
-          });
+          };
+          if (buffer.length > FILE_RAW_LIMIT) return sendJson(req, res, 413, { success: false, error: '文件超过 20MB' });
+          if (original) {
+            headers['X-File-SHA256'] = crypto.createHash('sha256').update(buffer).digest('hex');
+            headers['Access-Control-Expose-Headers'] = 'X-File-SHA256, Content-Disposition, Content-Length';
+          }
+          if (target.kind === 'download') {
+            headers['Content-Disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(filePath))}`;
+          }
+          res.writeHead(200, headers);
           res.end(buffer);
         });
       });
       return;
     }
 
-    if (isImg) {
-      fs.readFile(filePath, (readErr, buffer) => {
-        if (readErr) {
-          return sendJson(req, res, 500, { success: false, error: `Error reading file: ${readErr.message}` });
-        }
-        sendJson(req, res, 200, {
-          success: true,
-          path: filePath,
-          fileName: path.basename(filePath),
-          ext,
-          encoding: 'base64',
-          content: buffer.toString('base64')
-        });
+    if (isDir) {
+      const html = buildDirectoryHtml(filePath, access);
+      const buf = Buffer.from(html, 'utf8');
+      res.writeHead(200, {
+        ...corsHeaders(req),
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Length': buf.length,
+        'Cache-Control': 'private, max-age=30',
+        'X-Content-Type-Options': 'nosniff',
       });
+      res.end(buf);
       return;
     }
 
-    fs.readFile(filePath, 'utf-8', (readErr, content) => {
-      if (readErr) {
-        return sendJson(req, res, 500, { success: false, error: `Error reading file: ${readErr.message}` });
-      }
-      sendJson(req, res, 200, {
-        success: true,
-        path: filePath,
-        fileName: path.basename(filePath),
-        ext,
-        encoding: 'utf8',
-        content
-      });
-    });
-    return;
+    try {
+      const packed = packFileForClient(filePath);
+      return sendJson(req, res, 200, { success: true, path: filePath, requestPath: rawPath, fileName: path.basename(filePath), ext, ...packed });
+    } catch (e) { return sendJson(req, res, 500, { success: false, error: e.message }); }
   }
 
-  // ---- Web Push 订阅管理 ----
   if (reqUrl.pathname === '/api/push/public-key') {
     return sendJson(req, res, 200, { success: true, publicKey: vapidKeys.publicKey });
   }
@@ -3249,12 +3492,15 @@ function initWebSocketServer() {
   wss.on('connection', (ws, req) => {
     const clientId = crypto.randomUUID();
     ws.clientId = clientId;
+    ws.deviceId = auth.trackSocket(req, ws);
     ws.clientIp = req?.socket?.remoteAddress || '';
     ws.connectedAt = Date.now();
     lanClients.set(clientId, ws);
     console.log('[WS] Client connected');
+    ws.send(JSON.stringify({ type: 'hello', hubId: identity.hubId, instanceId: HOST_INSTANCE.instanceId, capabilities: workbenchCapabilities() }));
 
     ws.on('message', (message) => {
+      if (ws.revoked || ws.readyState !== 1 || !auth.authorize(req)) { ws.close(4403, 'revoked'); return; }
       try {
         const msg = JSON.parse(message.toString());
         handleClientMessage(ws, msg);
@@ -3287,12 +3533,18 @@ const appServerRefreshTimers = new Map(); // threadId -> debounce timer
 function getCodex() {
   if (codex) return codex;
   codex = new CodexAppServer();
+  try {
+    codex.setDefaultAccessMode(readCodexConfig().accessMode);
+  } catch { /* config optional at boot */ }
   codex.on('thread-activity', ({ threadId, method }) => {
+    // app-server turn 事件（started/completed/...）＝ Hub 持锁会话的写活动信号
+    if (threadId && codex.ownedThreads.has(threadId)) touchHubWriteActivity();
     // rollout jsonl 是展示权威源；app-server 通知只是更快的刷新信号（300ms 去抖）
     const force = method === 'turn/completed' || method === 'error';
     scheduleAppServerRefresh(threadId, force);
   });
   codex.on('approval', (a) => {
+    if (a.threadId && codex.ownedThreads.has(a.threadId)) touchHubWriteActivity(); // 等审批也是写活动
     if (a.threadId) {
       approvalClosedAt.delete(a.threadId);
     }
@@ -3309,6 +3561,11 @@ function getCodex() {
       expiresAt: at + APPROVAL_TTL_MS
     });
   });
+  codex.on('user-input', (a) => {
+    touchHubWriteActivity();
+    broadcastToClients({ type: 'user_input_request', threadId: a.threadId, requestId: String(a.requestId), method: a.method, payload: a.payload, at: a.at });
+  });
+  codex.on('user-input-closed', (a) => broadcastToClients({ type: 'user_input_resolved', threadId: a.threadId, requestId: String(a.requestId), reason: a.reason }));
   codex.on('approval-closed', (a) => {
     closeParsedApproval(a.threadId, a.requestId, a.reason || 'closed', a.ids || []);
   });
@@ -3328,6 +3585,117 @@ function scheduleAppServerRefresh(threadId, force = false) {
   );
 }
 
+// ----------------------------------------------------
+// Hub 空闲写锁自动释放（Idle Release）
+// ----------------------------------------------------
+// Hub 抢过（ownedThreads）的会话写入权不再持有到进程重启：空闲超阈值或到每日
+// 定点，且安全条件满足（无 owned 线程 live/running/waiting_approval、无进行中
+// 发送/审批/停止）时，终止 app-server 子进程释放全部锁并干净清零状态。
+let hubLastWriteActivityAt = Date.now(); // 全局最后写活动时间（发送/停止/审批/接管/turn 事件）
+let inflightActions = 0;                 // 进行中的发送/审批/停止计数
+let lastIdleReleaseAt = 0;               // 最近一次释放时间（每日计划当日只触发一次）
+
+function touchHubWriteActivity() {
+  hubLastWriteActivityAt = Date.now();
+}
+
+// 进行中写动作计数：handleRemoteSend / send_stop / send_approval 全程包裹，
+// 空闲释放安全条件之一（有进行中动作绝不释放）
+function trackInflightAction(fn) {
+  inflightActions += 1;
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => { inflightActions -= 1; });
+}
+
+// owned 线程是否处于 live / running / waiting_approval（needsApproval 判定与 getThreadList 同源）
+function ownedThreadBusy(threadId) {
+  const runtime = codex?.runtimeStatus?.(threadId);
+  if (!runtime?.known || runtime.busy !== false) return true;
+  if (threadIsLive(threadId)) return true;
+  const live = liveApprovalState(threadId);
+  if (live.live === true) return true;
+  if (live.live == null) {
+    const parsed = rolloutParseState.get(threadId);
+    return Boolean(parsed?.pendingApproval && !isParsedApprovalClosed(threadId, parsed.pendingApproval));
+  }
+  return false;
+}
+
+// lockHolder 变化（接管 → 'hub' / 释放 → null）不伴随 rollout 文件变化，watcher
+// 与 pushThreadUpdate 的去重门都不会触发；接管/释放后主动广播，防止前端保留旧横幅。
+function broadcastLockHolderChange(threadIds) {
+  const ids = (Array.isArray(threadIds) ? threadIds : [threadIds]).filter(Boolean);
+  for (const threadId of ids) {
+    try {
+      const info = rolloutCache.get(threadId);
+      if (!info || !info.path || !fs.existsSync(info.path)) continue;
+      const history = parseRolloutHistory(info.path, getActiveLockThreadIds(), threadId);
+      broadcastToClients({ type: 'thread_update', threadId, data: history });
+    } catch { /* 单线程推送失败不影响整体 */ }
+  }
+  lastThreadListBroadcastAt = 0; // 绕过 thread_list 2 秒节流，确保 lockHolder 及时下发
+  broadcastToClients({ type: 'thread_list', data: getThreadList() });
+}
+
+function maybeReleaseIdleWriterLocks(now = Date.now()) {
+  const client = codex;
+  const ownedIds = client ? [...client.ownedThreads] : [];
+  if (client?.client?.pending?.size || client?.client?.startingPromise || client?.pendingUserInputs?.size || client?.pendingApprovals?.size) return false;
+  // 释放前二次确认：安全条件读取与 releaseAll 在同一同步块内完成，无竞态窗口
+  const decision = shouldReleaseIdleWriterLocks({
+    ownedCount: ownedIds.length,
+    runtimeStates: ownedIds.map(id => client.runtimeStatus?.(id) || { known: false, busy: null }),
+    ownedBusy: ownedIds.some((id) => ownedThreadBusy(id)),
+    inflight: inflightActions,
+    lastActivityAt: hubLastWriteActivityAt,
+    lastDailyReleaseAt: lastIdleReleaseAt,
+    now,
+    config: IDLE_RELEASE_CONFIG,
+  });
+  if (!decision.release) return false;
+  try {
+    client.releaseAll();
+  } catch (e) {
+    console.warn(`[Idle Release] releaseAll failed: ${e.message}`);
+    return false;
+  }
+  lastIdleReleaseAt = now; // 任意成功释放都记录，避免同日 idle/daily 重复触发
+  console.log(`[Idle Release] released ${ownedIds.length} writer lock(s) reason=${decision.reason}: ${ownedIds.join(', ').slice(0, 300)}`);
+  broadcastLockHolderChange(ownedIds); // 推送线程列表，让客户端 lockHolder 更新为 null
+  return true;
+}
+
+// [Idle Release] scheduler：每 ~5 分钟检查一次，到点且安全即释放
+setInterval(() => {
+  try {
+    maybeReleaseIdleWriterLocks();
+  } catch (e) {
+    console.warn(`[Idle Release] check failed: ${e.message}`);
+  }
+}, 5 * 60 * 1000).unref?.();
+
+
+async function applyAccessModeToOwnedThreads(mode) {
+  const settings = accessModeToThreadSettings(mode);
+  const client = getCodex();
+  client.setDefaultAccessMode(mode);
+  if (!client.ownedThreads.size) return { applied: 0, settings };
+  await client.ensureStarted();
+  let applied = 0;
+  for (const id of client.ownedThreads) {
+    try {
+      await client.updateThreadSettings(id, settings);
+      applied += 1;
+    } catch (e) {
+      client.rememberThreadAccess(id, settings);
+      console.warn(`[Config Sync] thread/settings/update ${id} failed: ${e.message} (next turn/start will carry it)`);
+    }
+  }
+  console.log(`[Config Sync] live access ${settings.accessMode} applied to ${applied}/${client.ownedThreads.size} hub-owned threads`);
+  return { applied, settings };
+}
+
 // 建会话：首选真实 app-server（有 writer，桌面/网页双向可见），失败降级手写 rollout
 async function createThreadSmart(targetCwd, title = '新聊天', opts = {}) {
   const resolvedCwd = targetCwd ? ensureProjectCwd(targetCwd) : pickDefaultCwd();
@@ -3335,13 +3703,16 @@ async function createThreadSmart(targetCwd, title = '新聊天', opts = {}) {
   try {
     const client = getCodex();
     await client.ensureStarted();
+    const cfg = readCodexConfig();
     const r = await client.startThread({
       cwd: resolvedCwd,
-      approvalPolicy: opts.approvalPolicy ?? readCodexConfig().approvalPolicy ?? null
+      accessMode: opts.accessMode || (opts.approvalPolicy ? null : cfg.accessMode),
+      approvalPolicy: opts.approvalPolicy ?? cfg.approvalPolicy ?? null
     });
     const threadId = r?.thread?.id;
     if (threadId) {
       console.log(`[Remote Action] Created real thread ${threadId} under cwd ${resolvedCwd}`);
+      touchHubWriteActivity(); // 新建会话即取得写入权：重置空闲释放计时
       try { renameThread(threadId, nextTitle); } catch (e) {}
       return { threadId, real: true, title: nextTitle };
     }
@@ -3359,10 +3730,10 @@ function collaborationModeOf(mode) {
   return null;
 }
 
-async function handleRemoteSend(ws, threadId, text, isSteer, rawInput, mode) {
+async function handleRemoteSend(ws, threadId, text, isSteer, rawInput, mode, clientUserMessageId, queueOnly = false) {
   const action = isSteer ? 'Steer' : 'Send';
   const input = normalizeInput(rawInput, text);
-  const extra = { collaborationMode: collaborationModeOf(mode), mode: collaborationModeOf(mode) };
+  const extra = { collaborationMode: collaborationModeOf(mode), mode: collaborationModeOf(mode), clientUserMessageId, queueOnly };
   if (!input.length) {
     ws.send(JSON.stringify({
       type: 'action_feedback',
@@ -3377,43 +3748,46 @@ async function handleRemoteSend(ws, threadId, text, isSteer, rawInput, mode) {
   try {
     const ipc = getIpcClient();
     const client = getCodex();
-    await client.ensureStarted();
-    let ownerId = await discoverThreadOwner(ipc, threadId);
-    console.log(`[Remote Action] owner=${ownerId || 'none'} thread=${threadId} live=${threadIsLive(threadId)}`);
-
-    if (!ownerId && !client.ownedThreads.has(threadId) && threadIsLive(threadId)) {
+    const routed = await routeWriterSend({
+      client, ipc, threadId,
+      isLive: () => threadIsLive(threadId),
+      isDesktopAbsent,
+      waitForOwnerOrIdle: async () => {
+        ws.send(JSON.stringify({
+          type: 'action_feedback', status: 'success', threadId,
+          action: isSteer ? 'steer' : 'send', interim: true,
+          message: '桌面还在跑，等待结束后再发（不抢锁）',
+        }));
+        return waitForOwnerOrIdle(ipc, threadId);
+      },
+      followerSend: (ownerId) => tryFollowerSend(ipc, threadId, input, isSteer, ownerId, extra),
+      localSend: async () => {
+        const action = await sendLocalUserOrSteer(client, threadId, text, input, isSteer, extra);
+        clearGhostOwner(threadId); // 本地接管（resume 已通过）或本地发送成功：幽灵嫌疑解除
+        return action;
+      },
+      log: (info) => {
+        console.log(`[Remote Action] route threadId=${threadId} ${JSON.stringify(info)}`);
+        if (info && info.stage === 'takeover-resumed') {
+          touchHubWriteActivity(); // 本地接管成功（resume 已通过）：重置空闲计时
+          broadcastLockHolderChange(threadId); // lockHolder → 'hub' 主动推送，防旧横幅残留
+        }
+      },
+    });
+    console.log(`[Remote Action] send result threadId=${threadId} follower=${routed.follower} action=${routed.action}`);
+    touchHubWriteActivity(); // 发送成功＝写活动
+    if (routed.follower) {
       ws.send(JSON.stringify({
         type: 'action_feedback',
         status: 'success',
         threadId,
-        action: isSteer ? 'steer' : 'send',
-        interim: true,
-        message: '桌面还在跑，等待结束后再发（不抢锁）'
-      }));
-      const waited = await waitForOwnerOrIdle(ipc, threadId);
-      ownerId = waited.ownerId;
-      if (!ownerId && waited.live) {
-        throw new Error('桌面仍在运行该会话，已避免抢锁中断任务；请等结束后再发，或在桌面打开该会话后重试');
-      }
-    }
-
-    const followed = ownerId ? await tryFollowerSend(ipc, threadId, input, isSteer, ownerId, extra) : { ok: false };
-    if (followed.ok) {
-      ws.send(JSON.stringify({
-        type: 'action_feedback',
-        status: 'success',
-        threadId,
-        action: followed.action,
-        message: `${followed.action === 'steer' ? 'Steer' : 'Send'} 已交给持锁端（follower）`
+        action: routed.action,
+        message: `${routed.action === 'steer' ? 'Steer' : 'Send'} 已交给持锁端（follower）`
       }));
       return;
     }
 
-    if (!client.ownedThreads.has(threadId)) {
-      await resumeLocalWriter(client, threadId);
-    }
-
-    const sentAction = await sendLocalUserOrSteer(client, threadId, text, input, isSteer, extra);
+    const sentAction = routed.action;
     ws.send(JSON.stringify({
       type: 'action_feedback',
       status: 'success',
@@ -3425,17 +3799,23 @@ async function handleRemoteSend(ws, threadId, text, isSteer, rawInput, mode) {
     const raw = String(e.message || e || '');
     const quota = accountQuotaCache.value || {};
     const quotaHit = isQuotaError(raw) || isQuotaExhausted(quota);
+    const code = isWriterLockError(e) ? 'writer_lock_conflict'
+      : (e.code === 'writer_owner_unknown' || e.code === 'writer_lock_conflict') ? e.code
+        : quotaHit ? 'quota' : 'error';
     const message = isWriterLockError(e)
-      ? '该会话正由 Codex 桌面占用（写入锁冲突），请稍后再试'
-      : quotaHit
-        ? quotaExhaustedMessage(quota, raw)
-        : `${action} 失败: ${raw}`;
+      ? '该会话存在写入锁冲突，请稍后重试；仅在确认需要时手动强制清锁'
+      : (e.code === 'writer_owner_unknown' || e.code === 'writer_lock_conflict')
+        ? raw
+        : quotaHit
+          ? quotaExhaustedMessage(quota, raw)
+          : `${action} 失败: ${raw}`;
+    console.warn(`[Remote Action] send failed threadId=${threadId} code=${code}`);
     ws.send(JSON.stringify({
       type: 'action_feedback',
       status: 'error',
       threadId,
       action: isSteer ? 'steer' : 'send',
-      code: quotaHit ? 'quota' : 'error',
+      code,
       message
     }));
   }
@@ -3454,13 +3834,14 @@ const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']);
 
 function packFileForClient(filePath) {
   const stat = fs.statSync(filePath);
-  const take = Math.min(stat.size, FILE_PREVIEW_LIMIT);
+  const limit = IMAGE_EXTS.has(path.extname(filePath).toLowerCase()) ? 4 * 1024 * 1024 : FILE_PREVIEW_LIMIT;
+  const take = Math.min(stat.size, limit);
   const buf = Buffer.alloc(take);
   const fd = fs.openSync(filePath, 'r');
   fs.readSync(fd, buf, 0, take, 0);
   fs.closeSync(fd);
   const ext = path.extname(filePath).toLowerCase();
-  const truncated = stat.size > FILE_PREVIEW_LIMIT;
+  const truncated = stat.size > limit;
   if (IMAGE_EXTS.has(ext) || buf.includes(0)) {
     return { encoding: 'base64', content: buf.toString('base64'), truncated };
   }
@@ -3514,8 +3895,74 @@ async function listModelsForClient() {
     }));
 }
 
+function workbenchCapabilities() {
+  return { send_message: true, query_command: true, get_execution_state: true, queue_message: true, list_queue: true, cancel_queued_message: true, get_draft: true, save_draft: true, get_git_status: true, get_git_diff: true, send_user_input: true, desktop_user_input: false, handoff_thread: true, handoff: getHandoffCapabilities(codex) };
+}
+async function getExecutionState(threadId) {
+  const owned = codex?.ownedThreads?.has(threadId);
+  const ipc = getIpcClient();
+  const owner = owned ? { status: 'hub' } : await discoverThreadOwner(ipc, threadId);
+  const runtime = owned ? codex.runtimeStatus?.(threadId) : ipc.runtimeStatus?.(threadId);
+  const statusMap = { working: 'running', active: 'running', idle: 'idle', waiting_approval: 'waiting_approval', waiting_user_input: 'waiting_input' };
+  const status = runtime?.known ? (statusMap[runtime.status] || 'unknown') : 'unknown';
+  return { threadId, location: owned ? 'hub' : owner.status === 'found' ? 'desktop' : 'unknown', status, canHandoff: !!owned && status === 'idle', reason: status === 'unknown' ? 'Runtime or writer ownership is not confirmed' : undefined, pendingUserInputs: owned ? [...(codex.pendingUserInputs?.values() || [])].filter(p => p.threadId === threadId).map(p => ({ requestId: String(p.requestId), threadId: p.threadId, method: p.method, payload: p.payload, at: p.at })) : [] };
+}
+const workbench = createWorkbench({
+  dir: DATA_DIR, hubId: identity.hubId, cwd: resolveThreadCwd, executionState: getExecutionState,
+  notify: broadcastToClients,
+  handoff: async threadId => {
+    const result = await handoffThread({ client: codex, threadId, inflight: inflightActions });
+    if (result.ok) broadcastLockHolderChange(result.releasedThreadIds || [threadId]);
+    return result;
+  },
+  userInput: async msg => {
+    const request = codex?.pendingUserInputs?.get(String(msg.inputRequestId));
+    if (!request || request.threadId !== msg.threadId) return { ok: false, code: 'not_found' };
+    return codex.respondUserInput(msg.inputRequestId, { answers: msg.answers });
+  },
+  send: (msg, options) => trackInflightAction(async () => {
+    let terminal;
+    const sink = { send(data) { const value = JSON.parse(data); if (!value.interim) terminal = value; } };
+    await handleRemoteSend(sink, msg.threadId, msg.text, msg.type === 'send_steer', msg.input, msg.mode, msg.clientUserMessageId || msg.requestId, options?.queued);
+    if (!terminal) throw new Error('Send finished without a definitive response');
+    return terminal;
+  }),
+});
+setInterval(() => { workbench.drain().catch(e => console.warn('[queue]', e.message)); }, 2000).unref();
+
 async function handleClientMessage(ws, msg) {
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
+  if (msg.type === 'send_user_input') msg = { ...msg, type: 'respond_user_input' };
+  const response = await workbench.handle(msg);
+  if (response) {
+    try {
+      ws.send(JSON.stringify(response));
+      for (const pending of response.executionState?.pendingUserInputs || []) ws.send(JSON.stringify({ ...pending, type: 'user_input_request' }));
+    } catch {}
+    return;
+  }
+  if (['send_stop', 'send_approval'].includes(msg.type)) return workbench.store.serial(msg.threadId, () => handleLegacyClientMessage(ws, msg));
+  return handleLegacyClientMessage(ws, msg);
+}
+
+async function handleLegacyClientMessage(ws, msg) {
   const { type, threadId, text, input, requestId, decision, targetCwd, title, key, value, approvalPolicy } = msg;
+  if (type === 'download_file' || type === 'cancel_download') {
+    let manager = downloadManagers.get(ws);
+    if (!manager) {
+      manager = createDownloadManager({ send: (payload) => ws.send(JSON.stringify(payload)), authorize: (m) => fileAccessFor(m).authorize(m.path), isOpen: () => !ws.revoked && ws.readyState === 1, bufferedAmount: () => ws.bufferedAmount || 0 });
+      downloadManagers.set(ws, manager);
+      ws.once?.('close', () => manager.close());
+    }
+    if (type === 'cancel_download') manager.cancel(requestId);
+    else await manager.start(msg);
+    return;
+  }
+  const peer = ws;
+  ws = new Proxy(peer, { get(target, prop) {
+    if (prop === 'send') return (data) => { const payload = typeof data === 'string' ? JSON.parse(data) : data; return peer.send(JSON.stringify({ ...payload, ...correlationFields(msg, type === 'upload_file') })); };
+    const v = Reflect.get(target, prop); return typeof v === 'function' ? v.bind(target) : v;
+  } });
 
   if (type === 'get_threads') {
     const threadData = getThreadList();
@@ -3525,22 +3972,52 @@ async function handleClientMessage(ws, msg) {
       data: threadData,
       config: configData,
       quota: accountQuotaCache.value || {},
-      hostName: localHostName()
+      hostName: localHostName(),
+      hubId: identity.hubId,
+      capabilities: workbenchCapabilities()
     }));
-    getAccountQuota().catch(() => {});
+    getAccountQuota().then((quota) => {
+      if (!quota) return;
+      try {
+        ws.send(JSON.stringify({
+          type: 'config_data',
+          ...configApplicationInfo(),
+          data: configData,
+          quota,
+          hostName: localHostName(),
+      hubId: identity.hubId,
+      capabilities: workbenchCapabilities()
+        }));
+      } catch {
+        /* socket closed */
+      }
+    }).catch(() => {});
     if (pendingPinMaterialize) schedulePinMaterialize();
   }
 
   else if (type === 'get_config') {
     const configData = readCodexConfig();
-    ws.send(JSON.stringify({ type: 'config_data', data: configData, hostName: localHostName() }));
+    ws.send(JSON.stringify({
+      type: 'config_data',
+      ...configApplicationInfo(),
+      data: configData,
+      quota: accountQuotaCache.value || {},
+      hostName: localHostName(),
+      hubId: identity.hubId,
+      capabilities: workbenchCapabilities()
+    }));
   }
 
   else if (type === 'update_config') {
     if (key && value) {
-      updateCodexConfig(key, value);
+      const saved = updateCodexConfig(key, value) === true;
       const configData = readCodexConfig();
-      broadcastToClients({ type: 'config_data', data: configData });
+      broadcastToClients({ type: 'config_data', data: configData, ...configApplicationInfo(saved) });
+      if (saved && key === 'permission') {
+        applyAccessModeToOwnedThreads(value).catch((e) => {
+          console.warn('[Config Sync] live thread access update failed:', e.message);
+        });
+      }
     }
   }
 
@@ -3656,62 +4133,94 @@ async function handleClientMessage(ws, msg) {
   }
 
   else if (type === 'get_thread_history') {
-    if (!threadId) return;
+    if (!threadId) { ws.send(JSON.stringify({ type: 'thread_history', threadId: '', data: { items: [] }, error: '缺少 threadId' })); return; }
     const rolloutPath = findRolloutFilePathFast(threadId);
     const activeLocks = getActiveLockThreadIds();
     const all = Boolean(msg.all);
-    const history = parseRolloutHistory(rolloutPath, activeLocks, threadId, { all });
-    ws.send(JSON.stringify({ type: 'thread_history', threadId, data: { ...history, full: all } }));
+    const history = parseRolloutHistory(rolloutPath, activeLocks, threadId, { all, limit: msg.limit });
+    const packed = { type: 'thread_history', threadId, data: { ...history, full: all } };
+    ws.send(JSON.stringify(all ? packed : slimRelayApp(packed)));
     setupRolloutWatcher(threadId, rolloutPath);
   }
 
   else if (type === 'send_message') {
     if (!threadId) return;
-    handleRemoteSend(ws, threadId, text, false, input, msg.mode);
+    trackInflightAction(() => handleRemoteSend(ws, threadId, text, false, input, msg.mode));
   }
 
   else if (type === 'send_steer') {
     if (!threadId) return;
-    handleRemoteSend(ws, threadId, text, true, input, msg.mode);
+    trackInflightAction(() => handleRemoteSend(ws, threadId, text, true, input, msg.mode));
   }
 
   else if (type === 'send_stop') {
     if (!threadId) return;
       console.log(`[Remote Action] Interrupt/Stop thread ${threadId}`);
-    (async () => {
+    await trackInflightAction(async () => {
       try {
         const ipc = getIpcClient();
-        let ownerId = await ipc.findOwner(threadId).catch(() => null);
-        if (!ownerId && threadIsLive(threadId)) {
-          ownerId = (await waitForOwnerOrIdle(ipc, threadId, { timeoutMs: 8000 })).ownerId;
+        let owner = codex?.ownedThreads.has(threadId) ? { status: 'none' } : await discoverThreadOwner(ipc, threadId);
+        if (owner.status === 'none' && !codex?.ownedThreads.has(threadId) && threadIsLive(threadId)) {
+          owner = await waitForOwnerOrIdle(ipc, threadId, { timeoutMs: 8000 });
         }
+        if (owner.status === 'unknown' && await isDesktopAbsent()) owner = { status: 'none' };
+        if (owner.status === 'unknown') throw writerSafetyError('writer_owner_unknown', '无法确认会话持锁端，请稍后重试');
+        const ownerId = owner.ownerId;
         if (ownerId) {
-          const result = await ipc.interruptTurn(threadId, ownerId);
-          ws.send(JSON.stringify({
-            type: 'action_feedback',
-            status: 'success',
-            message: result?.interruptedTurnId
-              ? `已通知持锁端停止 ${result.interruptedTurnId}`
-              : '已向持锁端发送停止（当前可能没有活动 Turn）'
-          }));
-          return;
+          try {
+            const result = await ipc.interruptTurn(threadId, ownerId);
+            clearGhostOwner(threadId); // follower 投递成功：幽灵嫌疑解除
+            touchHubWriteActivity();
+            console.log(`[Remote Action] stop result threadId=${threadId} routed=follower ownerStatus=found`);
+            ws.send(JSON.stringify({
+              type: 'action_feedback',
+              status: 'success',
+              message: result?.interruptedTurnId
+                ? `已通知持锁端停止 ${result.interruptedTurnId}`
+                : '已向持锁端发送停止（当前可能没有活动 Turn）'
+            }));
+            return;
+          } catch (e) {
+            // follower 目标已消失（含幽灵 owner）：尝试本地接管后打断，而非直接失败；
+            // resume 撞上 writer 锁由接管 helper 转 writer_lock_conflict（保留强制删锁路径）。
+            if (!isNoClientFound(e)) throw e;
+            ipc.forgetOwner(threadId);
+            rememberGhostOwner(threadId, ownerId);
+            console.warn(`[Remote Action] stop follower no-client-found, takeover then interrupt threadId=${threadId}`);
+            const wasOwned = codex?.ownedThreads.has(threadId);
+            const takenClient = await takeoverThreadAfterNoClient(threadId, 'stop');
+            await takenClient.interruptTurn(threadId);
+            touchHubWriteActivity();
+            console.log(`[Remote Action] stop result threadId=${threadId} routed=${wasOwned ? 'local' : 'local-takeover'} ownerStatus=${owner.status}`);
+            ws.send(JSON.stringify({
+              type: 'action_feedback',
+              status: 'success',
+              threadId,
+              message: wasOwned ? '已发送打断指令' : '已接管会话并发送打断指令'
+            }));
+            return;
+          }
         }
         const client = getCodex();
-        await client.ensureStarted();
         if (!client.ownedThreads.has(threadId)) {
           ws.send(JSON.stringify({
             type: 'action_feedback',
             status: 'error',
+            threadId,
             message: '该会话没有可路由的持锁端，且不由本后端运行'
           }));
           return;
         }
         await client.interruptTurn(threadId);
+        touchHubWriteActivity();
+        console.log(`[Remote Action] stop result threadId=${threadId} routed=local ownerStatus=${owner.status}`);
         ws.send(JSON.stringify({ type: 'action_feedback', status: 'success', message: '已发送打断指令' }));
       } catch (e) {
-        ws.send(JSON.stringify({ type: 'action_feedback', status: 'error', message: `停止失败: ${e.message}` }));
+        const code = (e.code === 'writer_owner_unknown' || e.code === 'writer_lock_conflict') ? e.code : 'error';
+        console.warn(`[Remote Action] stop failed threadId=${threadId} code=${code}`);
+        ws.send(JSON.stringify({ type: 'action_feedback', status: 'error', threadId, code, message: `停止失败: ${e.message}` }));
       }
-    })();
+    });
   }
 
   else if (type === 'send_approval') {
@@ -3720,7 +4229,7 @@ async function handleClientMessage(ws, msg) {
       return;
     }
     console.log(`[Remote Action] Approval ${decision} for request ${requestId} on thread ${threadId}`);
-    (async () => {
+    await trackInflightAction(async () => {
       const reply = (status, message, extra = {}) => {
         ws.send(JSON.stringify({
           type: 'action_feedback',
@@ -3733,33 +4242,64 @@ async function handleClientMessage(ws, msg) {
       };
       try {
         const ipc = getIpcClient();
-        const ownerId = await ipc.findOwner(threadId).catch(() => null);
+        let owner = codex?.ownedThreads.has(threadId) ? { status: 'none' } : await discoverThreadOwner(ipc, threadId);
+        if (owner.status === 'unknown' && await isDesktopAbsent()) owner = { status: 'none' };
+        if (owner.status === 'unknown') throw writerSafetyError('writer_owner_unknown', '无法确认会话持锁端，请稍后重试');
+        const ownerId = owner.ownerId;
         if (ownerId) {
           const extraIds = Array.isArray(msg.ids) ? msg.ids : [];
           const cached = overlayLiveApproval(threadId, rolloutParseState.get(threadId)?.pendingApproval);
           const liveKind = (desktopPendingForThread(threadId) || [])[0]?.method;
-          const result = await ipc.sendApprovalDecision({
-            conversationId: threadId,
-            requestId,
-            extraIds: [...extraIds, ...(cached?.ids || []), cached?.id],
-            decision: normalizeDecision(decision),
-            kind: msg.kind || msg.approvalKind || liveKind || cached?.type,
-            ownerId,
-          });
-          closeParsedApproval(threadId, result?.requestId || requestId, 'decided', extraIds);
-          reply('success', '电脑端已接住，正在继续跑', {
-            code: 'ok',
-            desktop: true,
-            requestId: result?.requestId || requestId,
-          });
-          return;
+          try {
+            const result = await ipc.sendApprovalDecision({
+              conversationId: threadId,
+              requestId,
+              extraIds: [...extraIds, ...(cached?.ids || []), cached?.id],
+              decision: normalizeDecision(decision),
+              kind: msg.kind || msg.approvalKind || liveKind || cached?.type,
+              ownerId,
+            });
+            clearGhostOwner(threadId); // follower 投递成功：幽灵嫌疑解除
+            closeParsedApproval(threadId, result?.requestId || requestId, 'decided', extraIds);
+            touchHubWriteActivity();
+            console.log(`[Remote Action] approval result threadId=${threadId} routed=follower ownerStatus=found`);
+            reply('success', '电脑端已接住，正在继续跑', {
+              code: 'ok',
+              desktop: true,
+              requestId: result?.requestId || requestId,
+            });
+            return;
+          } catch (e) {
+            // follower 目标已消失（含幽灵 owner）：尝试本地接管后走本地审批分支；
+            // resume 撞上 writer 锁由接管 helper 转 writer_lock_conflict（保留强制删锁路径）。
+            if (!isNoClientFound(e)) throw e;
+            ipc.forgetOwner(threadId);
+            rememberGhostOwner(threadId, ownerId);
+            console.warn(`[Remote Action] approval follower no-client-found, takeover then local decide threadId=${threadId}`);
+            const takenClient = await takeoverThreadAfterNoClient(threadId, 'approval');
+            const r = decideApprovalLocally(takenClient, threadId, requestId, decision);
+            if (!r.ok && (r.code === 'not_found' || r.code === 'expired')) {
+              closeParsedApproval(threadId, requestId, r.code, extraIds);
+            }
+            if (r.ok) touchHubWriteActivity();
+            console.log(`[Remote Action] approval result threadId=${threadId} routed=local-takeover ok=${r.ok}`);
+            reply(r.ok ? 'success' : 'error', r.ok
+              ? '已接管会话，本机 Hub 已处理审批'
+              : r.reason, {
+              code: r.ok ? 'ok' : (r.code || 'error'),
+              desktop: false,
+              requestId: r.requestId || requestId
+            });
+            return;
+          }
         }
         const client = getCodex();
-        let r = client.decideApproval(requestId, decision);
-        if (!r.ok && r.code === 'not_found') r = client.decideApproval(threadId, decision);
+        const r = decideApprovalLocally(client, threadId, requestId, decision);
         if (!r.ok && (r.code === 'not_found' || r.code === 'expired')) {
           closeParsedApproval(threadId, requestId, r.code, Array.isArray(msg.ids) ? msg.ids : []);
         }
+        if (r.ok) touchHubWriteActivity();
+        console.log(`[Remote Action] approval result threadId=${threadId} routed=local ownerStatus=${owner.status} ok=${r.ok}`);
         reply(r.ok ? 'success' : 'error', r.ok
           ? '本机 Hub 已处理审批（当前没有桌面持锁）'
           : r.reason, {
@@ -3771,9 +4311,11 @@ async function handleClientMessage(ws, msg) {
         const msgText = String(e.message || e || '');
         const gone = /timeout|not found|未命中|没有找到|已超时/i.test(msgText);
         if (gone) closeParsedApproval(threadId, requestId, 'not_found', Array.isArray(msg.ids) ? msg.ids : []);
-        reply('error', `审批失败: ${e.message}`, { code: gone ? 'not_found' : 'error' });
+        const code = (e.code === 'writer_owner_unknown' || e.code === 'writer_lock_conflict') ? e.code : gone ? 'not_found' : 'error';
+        console.warn(`[Remote Action] approval failed threadId=${threadId} code=${code}`);
+        reply('error', `审批失败: ${e.message}`, { code });
       }
-    })();
+    });
   }
 
   else if (type === 'stop_command') {
@@ -3786,28 +4328,61 @@ async function handleClientMessage(ws, msg) {
     ws.send(JSON.stringify({ type: 'action_feedback', status: 'success', threadId, action: 'command', message: '已停止命令' }));
   }
 
-  else if (type === 'search_workspace') {
-    const cwd = msg.cwd || resolveThreadCwd(threadId) || pickDefaultCwd();
-    const q = String(msg.q || msg.query || '').trim();
-    ws.send(JSON.stringify({
-      type: 'workspace_search',
-      threadId: threadId || '',
-      cwd,
-      q,
-      hits: searchWorkspaceFiles(cwd, q),
-      error: null,
-    }));
+  else if (type === 'search_workspace' || type === 'list_artifacts') {
+    const responseType = type === 'search_workspace' ? 'workspace_search' : 'artifacts_list';
+    try {
+      const access = fileAccessFor(msg);
+      const cwd = access.cwd;
+      const q = String(msg.q || msg.query || '').trim();
+      const data = type === 'search_workspace'
+        ? { q, hits: searchWorkspaceFiles(cwd, q).filter((f) => access.allows(f.path)) }
+        : artifactListing(threadId, access);
+      ws.send(JSON.stringify({ type: responseType, threadId: threadId || '', cwd, ...data, error: null }));
+    } catch (e) {
+      ws.send(JSON.stringify({ type: responseType, threadId: threadId || '', hits: [], files: [], artifacts: [], recentDocuments: [], error: e.message }));
+    }
   }
 
-  else if (type === 'list_artifacts') {
-    const cwd = msg.cwd || resolveThreadCwd(threadId) || pickDefaultCwd();
-    ws.send(JSON.stringify({
-      type: 'artifacts_list',
-      threadId: threadId || '',
-      cwd,
-      files: listArtifactFiles(cwd),
-      error: null,
-    }));
+  else if (type === 'pty_open') {
+    const cwd = resolveThreadCwd(threadId);
+    if (!cwd) {
+      ws.send(JSON.stringify({ type: 'action_feedback', status: 'error', threadId, action: 'pty', message: '会话没有工作目录' }));
+      return;
+    }
+    try {
+      const result = ptyHub.open({
+        threadId,
+        cwd,
+        cols: msg.cols,
+        rows: msg.rows,
+        send: (payload) => ptySend(ws, payload),
+      });
+      ws.send(JSON.stringify({
+        type: 'action_feedback',
+        status: 'success',
+        threadId,
+        action: 'pty',
+        attached: result.attached,
+        cwd: result.cwd,
+        message: result.attached ? '已接上现有终端' : `终端已打开（${path.basename(result.cwd)}）`,
+      }));
+    } catch (e) {
+      ws.send(JSON.stringify({ type: 'action_feedback', status: 'error', threadId, action: 'pty', message: e.message || String(e) }));
+    }
+  }
+
+  else if (type === 'pty_input') {
+    if (!ptyHub.input(threadId, msg.data)) {
+      ws.send(JSON.stringify({ type: 'action_feedback', status: 'error', threadId, action: 'pty', message: '终端还没打开' }));
+    }
+  }
+
+  else if (type === 'pty_resize') {
+    ptyHub.resize(threadId, msg.cols, msg.rows);
+  }
+
+  else if (type === 'pty_close') {
+    ptyHub.close(threadId);
   }
 
   else if (type === 'run_command') {
@@ -3887,13 +4462,14 @@ async function handleClientMessage(ws, msg) {
 
   else if (type === 'get_file') {
     const rawPath = msg.path || msg.filePath || '';
-    const cwd = msg.cwd || resolveThreadCwd(threadId);
-    const filePath = resolveRequestedFile(rawPath, cwd);
+    let filePath;
+    try { filePath = fileAccessFor(msg).authorize(rawPath); } catch {}
     if (!filePath) {
       ws.send(JSON.stringify({
         type: 'file_data',
         threadId: threadId || '',
         path: rawPath,
+        requestPath: rawPath,
         fileName: '',
         ext: '',
         encoding: 'utf8',
@@ -3909,6 +4485,7 @@ async function handleClientMessage(ws, msg) {
         type: 'file_data',
         threadId: threadId || '',
         path: filePath,
+        requestPath: rawPath,
         fileName: path.basename(filePath),
         ext: path.extname(filePath).toLowerCase(),
         encoding: packed.encoding,
@@ -3921,6 +4498,7 @@ async function handleClientMessage(ws, msg) {
         type: 'file_data',
         threadId: threadId || '',
         path: filePath,
+        requestPath: rawPath,
         fileName: path.basename(filePath),
         ext: path.extname(filePath).toLowerCase(),
         encoding: 'utf8',
@@ -4012,10 +4590,12 @@ async function handleClientMessage(ws, msg) {
 
   else if (type === 'get_workspace_tree') {
     (async () => {
-      const cwd = msg.cwd || resolveThreadCwd(threadId) || pickDefaultCwd();
-      const target = msg.path || cwd;
+      let cwd = '', target = '';
       try {
-        const tree = await buildWorkspaceDirectoryTreeAsync(target, 0, 0);
+        const access = fileAccessFor(msg);
+        cwd = access.cwd;
+        target = access.authorize(msg.path || cwd);
+        const tree = (await buildWorkspaceDirectoryTreeAsync(target, 0, 0)).filter((f) => access.allows(f.path));
         ws.send(JSON.stringify({
           type: 'workspace_tree',
           threadId: threadId || '',
@@ -4073,6 +4653,31 @@ async function handleClientMessage(ws, msg) {
       }));
     }
   }
+}
+
+function fileAccessFor(msg = {}) {
+  try { loadThreadMetaCache(); } catch {}
+  const threadCwd = resolveThreadCwd(msg.threadId);
+  if (msg.threadId && !threadCwd) throw new Error('会话没有已授权工作目录');
+  const roots = msg.threadId ? [threadCwd] : [...threadMetaCache.values(), ...rolloutCache.values()].map((meta) => meta.cwd).filter(Boolean);
+  const base = threadCwd || roots[0] || '';
+  const generatedImageRoot = threadCwd && /^[a-zA-Z0-9_-]+$/.test(String(msg.threadId || ''))
+    ? path.join(CODEX_HOME, 'generated_images', msg.threadId) : '';
+  let access = createFileAccess({ roots, uploadDir: UPLOAD_DIR, cwd: base, deniedRoots: [CODEX_HOME, DATA_DIR], generatedImageRoot });
+  const cwd = msg.cwd ? access.authorize(msg.cwd) : base;
+  access = createFileAccess({ roots, uploadDir: UPLOAD_DIR, cwd, deniedRoots: [CODEX_HOME, DATA_DIR], generatedImageRoot });
+  return { ...access, cwd };
+}
+
+function artifactListing(threadId, access) {
+  const index = readArtifactItems(findRolloutFilePathFast(threadId));
+  const artifacts = collectArtifacts(index.items, access, { threadId });
+  const artifactPaths = new Set(artifacts.map((f) => f.path));
+  const recentDocuments = listArtifactFiles(access.cwd).flatMap((f) => {
+    try { const full = access.authorize(f.path); return artifactPaths.has(full) ? [] : [fileMetadata(full, 'recent_document')]; } catch { return []; }
+  });
+  const { items, ...scope } = index;
+  return { files: artifacts, artifacts, recentDocuments, ...scope };
 }
 
 function resolveThreadCwd(threadId) {
@@ -4231,13 +4836,14 @@ function broadcastToClients(msg) {
     }
   }
 
-  const data = JSON.stringify(msg);
+  const wire = slimRelayApp(msg);
+  const data = JSON.stringify(wire);
   wss.clients.forEach(client => {
     if (client.readyState === 1) {
       client.send(data);
     }
   });
-  try { relay.forwardApp(slimRelayApp(msg)); } catch { /* ignore */ }
+  try { relay.forwardApp(wire); } catch { /* ignore */ }
 }
 
 function slimRelayApp(msg) {
@@ -4342,6 +4948,42 @@ setInterval(() => {
 }, 500);
 
 // ----------------------------------------------------
+// 优雅退出：SIGINT/SIGTERM/'exit' 先 releaseAll（同步，含 taskkill 杀
+// codex 子进程树）再 process.exit，避免留下孤儿 codex.exe 持锁
+// ----------------------------------------------------
+let hubShuttingDown = false;
+function shutdownHubGracefully(via) {
+  if (hubShuttingDown) return;
+  hubShuttingDown = true;
+  try {
+    if (codex && codex.running) console.log(`[Shutdown] ${via}: releasing codex app-server child tree`);
+    if (codex) codex.releaseAll();
+  } catch (e) {
+    console.warn(`[Shutdown] ${via}: releaseAll failed: ${e.message}`);
+  }
+}
+process.on('SIGINT', () => { shutdownHubGracefully('SIGINT'); process.exit(0); });
+process.on('SIGTERM', () => { shutdownHubGracefully('SIGTERM'); process.exit(0); });
+process.on('exit', () => { shutdownHubGracefully('exit'); }); // exit handler 只能同步
+
+// 启动清孤儿：hub 就绪后异步扫描一次，ExecutablePath 指向所选 codex 目录或
+// 仓库 codex-bin\codex.exe、且父进程已死的 codex.exe → taskkill /T /F。
+function scheduleOrphanCodexCleanup() {
+  const timer = setTimeout(() => {
+    try {
+      cleanupOrphanCodexProcesses({
+        codexBinDir: CODEX_BIN_SELECTION.dir,
+        repoCodexBinDir: REPO_CODEX_BIN_DIR,
+        selfPid: process.pid,
+      });
+    } catch (e) {
+      console.warn('[Orphan Cleanup] scan failed:', e.message);
+    }
+  }, 2000);
+  timer.unref?.();
+}
+
+// ----------------------------------------------------
 // Force Fixed Port Binding (100% Locked on Port 18990)
 // ----------------------------------------------------
 
@@ -4382,6 +5024,7 @@ function startServerStrict(portToUse) {
     initWebSocketServer();
     relay.start();
     getAccountQuota().catch(() => {});
+    scheduleOrphanCodexCleanup();
   }).on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
       console.error(`Port ${portToUse} is in use.${describePortOccupant(portToUse)} Stop the other Hub or set PORT=.`);

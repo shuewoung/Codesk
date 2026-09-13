@@ -12,7 +12,7 @@
 
 | 端 | 目录 | 命运 |
 |---|---|---|
-| PWA | `apps/web/` | 保留，本窗口禁止改 |
+| 旧 PWA | `archive/web/`、`archive/web-hub-public/` | 仅归档，不再托管 |
 | Hub | `apps/web-hub/server/` | 保留，本窗口禁止改 |
 | 中继 | `apps/relay/` | 保留，本窗口禁止改 |
 | Expo | `apps/mobile/` | 正式壳（Android / iOS / `expo start --web`） |
@@ -26,13 +26,13 @@
 
 ## 已拍板
 
-1. **双端共存。** PWA 继续能用。Expo 是新客户端，不是替换。
+1. **Expo 单源。** 旧 PWA 已归档；优先 Expo Web + Tailscale / 二维码，APK 专项后置。
 2. **Expo，不是安卓原生，也不是先写安卓再移植。**
 3. **不 fork Happy。** 不接他们的 `sync/`、socket.io、E2E、`happy` CLI。手感可以像，数据层必须是我们的协议。
-4. **旧 PWA 不删不搬。** 中继协议不改。Hub 可按 [04-protocol.md](04-protocol.md) 增加未登录 `GET /api/discover`、局域网 CORS、以及 WS `?token=`（浏览器不能自定义头）。原生 WS 仍可用 `Authorization: Bearer <deviceToken>`。
-5. **出门走中继，家里直连 Hub。** 原生 App 配对页两套入口。不要 WebRTC。日常浏览器走 Expo Web `:18991`；Hub `:18990` 是协议 + 主机台，探测到 18991 会把工作台重定向过去。回环免码；从其他电脑打开 Expo Web 时 Hub 用当前主机 `:18990`，只输家里码，不填 IP。公网隧道打开 Expo Web 时用当前页同源（Metro 转到 Hub），不要拼 `:18990`。`hub.codesk.icu` 中继页禁止探测。
+4. **不恢复归档 PWA。** 中继协议不改。Hub 可按 [04-protocol.md](04-protocol.md) 增加未登录 `GET /api/discover`、局域网 CORS、以及 WS `?token=`（浏览器不能自定义头）。原生 WS 仍可用 `Authorization: Bearer <deviceToken>`。
+5. **出门走中继，家里直连 Hub。** 原生 App 配对页两套入口。日常浏览器走 Expo Web `:18991`；Hub `:18990` 是协议 + 主机台，探测到 18991 时只把**本机**工作台重定向过去。回环免码；从其他电脑打开 Expo Web 时 Hub 用当前主机 `:18990`，只输家里码，不填 IP。公网隧道打开 Expo Web 时用当前页同源（Metro 转到 Hub），不要拼 `:18990`。隧道指到 `:18990` 时不要 302 到 `127.0.0.1`。`hub.codesk.icu` 中继页禁止探测。
 6. **token 用 SecureStore。** 扫一次，以后打开自动连。退出才 `POST /api/relay/revoke`。
-7. **电脑休眠 = 主机离线。** 不做离线消息队列。
+7. **电脑休眠 = 主机离线。** UI 显示「主机离线」。
 8. **Claude Code / OpenCode 页签本窗口不做。**
 
 ## 窗口 4 负责
@@ -43,9 +43,9 @@
 
 ## 不准做
 
-- 不要改 `apps/web-hub/public/`、`apps/relay/`、`docs/PLAN.md`
+- 不要改归档 PWA、`apps/relay/`、`docs/PLAN.md`
 - 不要建仓库根目录 `android/` `ios/`
-- 不要把 `apps/web-hub/public/app.js` 搬进 RN
+- 不要把 `archive/web-hub-public/app.js` 搬进 RN
 - 不要抄 slopus/happy 的加密和同步
 - 不要 Web Push / VAPID。不要上架、不要冒充 Happy
 
@@ -119,27 +119,22 @@
 
 协议增量见 [04-protocol.md](04-protocol.md)：`get_file` / `get_models` / `get_workspace_tree` / `upload_file`。Hub 已实现。
 
-## 以后可加（按性价比）
+## 已有能力与后续验收
 
-0. **出门 E2E** 扫 `hk`、握手、`fwd.enc`（[06-e2e.md](06-e2e.md)）——与审批同为必须
-1. **斜杠命令** `/compact` 当普通 `send_message`；`/plan` `/review` 打开专用页
-2. **重命名会话** `rename_thread`
-3. **只读 Git / 命令面板** `git_status` `run_command`
-4. **局域网直连** 口令登录 + 大文件 REST 上传
-5. **会话内搜索** 现只有列表搜标题
-6. **极光推送**：审批 / 任务完成由 Hub 经中继代发。Expo Go 无 RID。正式 Android 包发 `register_push`。先不做 iOS。
-7. 技能/MCP、多 Hub、上架 APK
+当前源码已包含出门 E2E（[06-e2e.md](06-e2e.md)）、斜杠命令、重命名会话、Git/命令/交互终端、局域网直连及 REST 上传、会话内搜索，不再将这些列为待从零新增的功能。极光推送的 Expo Go 无 RID；正式 Android 包使用 `register_push`，iOS 能力需单独验收。
+
+本轮重点是这些能力在断线、慢网、失败和切换会话时的可靠性，以及附件来源、产物分区和文件原件获取。完整任务与实际验收结论见 [09-ux-improvements.md](09-ux-improvements.md)，不能以源码存在代替发布或真机验收。
 
 ## Expo Web
 
-开发态正式入口是 `apps/mobile` 的 `npx expo start --web` → `http://localhost:18991`，不是 Hub `:18990` 的 PWA。不要把 `apps/web/app.js` 抄进 RN。
+开发态正式入口是 `apps/mobile` 的 `npx expo start --web` → `http://localhost:18991`，Hub `:18990` 托管 Expo 静态导出。不要把 `archive/web/app.js` 抄进 RN。
 
 - Web 依赖按 SDK 54 用 `npx expo install react-dom react-native-web @expo/metro-runtime`。
 - 配对页自动 HTTP 探测本机 Hub（见 04-protocol），不要手填默认局域网 IP。
 - Web 隐藏相机扫码；推送 no-op；存储先试 SecureStore，不行就 `localStorage`。
 - Web 认 `#thread-<uuid>`（也认 `?threadId=`）。打开时若带会话 ID：先不渲染任何会话，等 WS `connected` 再 `get_thread_history`；切会话用 `replaceState` 写成 hash。配对 query `?pair=` 不动。
 - 出门地址是 `https://hub.codesk.icu:8787`。Android 必须 `expo-crypto` 给 tweetnacl 补 PRNG，否则握手停在「正在连中继」并报 `no PRNG`。
-- 本窗口不打 EAS 上架，也不把 Expo 静态包挂到 Hub（same-origin 托管另开窗口）。已装的旧 APK 不含上述修复，须重打。
+- 本窗口不打 EAS 上架；Expo 静态包已通过 `export:web` 供 Hub 同源托管。已装的旧 APK 不含上述修复，须重打。
 
 ## 界面改版（对照官方 Remote，不 1:1）
 
@@ -172,12 +167,12 @@
 - **可选「显示过程」。** 设置里关开，默认关。
 - **顶栏：** 返回 + 中间标题胶囊（标题 / 项目名 / 主机）+ 状态 + `⋯`（复制 threadId、重命名）。
 - **输入区上方：** 模型、权限两个浅灰芯片（已有数据）。
-- **输入区：** `+` | 圆角输入（「在 {主机} 上…」）| 发送。`+` 本轮只放「换项目/新聊天」，不做拍照上传、不做语音。
+- **输入区：** `+` | 圆角输入（「在 {主机} 上…」）| 发送。早期“只放换项目/新聊天”的范围已被后续附件实现替代；本轮区分“从当前设备上传”和“从宿主机选择”，保留拍照/相册入口，不新增语音。
 - **键盘：** Android `softwareKeyboardLayoutMode=resize` + 用键盘高度把底栏顶上去，禁止被输入法挡住。
 
 ### 明确不做（官方有、我们本轮没有）
 
-多主机开关、消息排队、解锁 Remote、Codex 虚拟宠物、上传照片、计划模式、插件列表、语音。
+本轮不新增多主机切换、离线自动发送队列、解锁 Remote、虚拟宠物、插件管理或语音。照片上传与计划展示已经在后续源码中实现，不再列为未实现项。
 
 ### 验收
 
@@ -195,7 +190,7 @@
 
 ## 验收
 
-- 电脑 PWA 生成配对码，Expo 扫一次（或手输）进入
+- 电脑主机台生成长期配对码，Expo 扫一次（或手输）进入
 - 杀进程再开，不用再扫，直接进上次 Hub
 - Hub 在线：能看到会话、能发、能批
 - 关掉 Hub：数秒内看到「主机离线」，不是转圈

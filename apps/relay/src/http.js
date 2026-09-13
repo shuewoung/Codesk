@@ -145,13 +145,14 @@ async function routeApi(req, res, url, ctx) {
     store.verifyHub(creds.hubId, creds.hubSecret);
     const rec = store.createPairCode({
       hubId: creds.hubId,
-      ttlSec: Math.min(3600, Number(body.ttlSec) || config.pairTtlSec),
+      ttlSec: Math.min(3600, Math.max(0, Number(body.ttlSec) || 0)),
+      refresh: body.refresh === true,
       hubE2ePub: body.hubE2ePub || ''
     });
     sendJson(res, 200, {
       code: rec.code,
       expiresAt: rec.expiresAt,
-      expiresAtMs: Date.parse(rec.expiresAt),
+      expiresAtMs: rec.expiresAt ? Date.parse(rec.expiresAt) : null,
       hubId: rec.hubId
     });
     return true;

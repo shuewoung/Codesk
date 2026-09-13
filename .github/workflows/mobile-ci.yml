@@ -5,26 +5,45 @@ on:
     branches: [main, public]
     paths:
       - "apps/mobile/**"
+      - "apps/web-hub/**"
+      - "apps/relay/**"
+      - "tests/mobile/**"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/mobile-ci.yml"
   pull_request:
     paths:
       - "apps/mobile/**"
+      - "apps/web-hub/**"
+      - "apps/relay/**"
+      - "tests/mobile/**"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/mobile-ci.yml"
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/mobile
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: apps/mobile/package-lock.json
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run lint
+          cache-dependency-path: |
+            package-lock.json
+            apps/mobile/package-lock.json
+            apps/web-hub/package-lock.json
+            apps/relay/package-lock.json
+      # Mobile relay-client tests import the relay across project boundaries.
+      - run: npm ci --ignore-scripts
+      - run: npm ci --prefix apps/relay
+      - run: npm ci --prefix apps/web-hub
+      - run: npm ci --prefix apps/mobile
+      - run: npm test --prefix apps/relay
+      - run: npm test --prefix apps/web-hub
+      - run: npm run typecheck --prefix apps/mobile
+      - run: npm test --prefix apps/mobile
+      - run: npm run lint --prefix apps/mobile
+      - run: npm run export:web --prefix apps/mobile
+      - run: node --test tests/mobile/ux-fixture.test.mjs

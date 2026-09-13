@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { WebSocket } from 'ws';
-import { authHeader, connectAuthedWs, startHub, stopHub, waitForWs, writeThreadFixture } from './harness.mjs';
+import { authHeader, connectAuthedWs, freePort, startHub, stopHub, waitForWs, writeThreadFixture } from './harness.mjs';
 
 const results = [];
 function record(name, ok, detail = '') {
@@ -174,6 +175,15 @@ try {
     headers: { 'CF-Connecting-IP': '203.0.113.10' },
   });
   record('raw image denied through tunnel without login', rawDenied.status === 401);
+  const htmlDenied = await fetch(`${hub.base}/api/file?path=${encodeURIComponent(shotPath)}&raw=1`, {
+    headers: { 'CF-Connecting-IP': '203.0.113.10', Accept: 'text/html' },
+  });
+  const htmlDeniedBody = await htmlDenied.text();
+  record(
+    'browser file link denied as html login page',
+    htmlDenied.status === 401 && htmlDeniedBody.includes('去登录'),
+    htmlDenied.headers.get('content-type'),
+  );
   const rawOk = await fetch(`${hub.base}/api/file?path=${encodeURIComponent(shotPath)}&raw=1`, { headers });
   const rawBuf = Buffer.from(await rawOk.arrayBuffer());
   record(
@@ -181,6 +191,31 @@ try {
     rawOk.ok && rawOk.headers.get('content-type') === 'image/png' && rawBuf.equals(shot),
     rawOk.headers.get('content-type'),
   );
+
+  const packDir = path.join(repo, 'pack');
+  const previewDir = path.join(packDir, '.web-preview');
+  fs.mkdirSync(previewDir, { recursive: true });
+  const docxPath = path.join(packDir, '采购文件.docx');
+  const pdfPath = path.join(previewDir, '采购文件.pdf');
+  fs.writeFileSync(docxPath, 'ole-fake');
+  fs.writeFileSync(pdfPath, '%PDF-1.4 test');
+  const dirRes = await fetch(`${hub.base}/api/file?path=${encodeURIComponent(packDir)}&raw=1`, { headers });
+  const dirHtml = await dirRes.text();
+  record(
+    'raw directory listing is html',
+    dirRes.ok && (dirRes.headers.get('content-type') || '').includes('text/html') && dirHtml.includes('采购文件.docx'),
+    dirRes.headers.get('content-type'),
+  );
+  const officeRes = await fetch(`${hub.base}/api/file?path=${encodeURIComponent(docxPath)}&raw=1`, { headers });
+  const officeBuf = Buffer.from(await officeRes.arrayBuffer());
+  record(
+    'office raw serves web-preview pdf',
+    officeRes.ok && (officeRes.headers.get('content-type') || '').includes('pdf') && officeBuf.includes('%PDF-1.4'),
+    officeRes.headers.get('content-type'),
+  );
+  const slashEncoded = packDir.replace(/\\/g, '%5C');
+  const encodedRes = await fetch(`${hub.base}/api/file?path=${slashEncoded}&raw=1`, { headers });
+  record('encoded windows path still lists directory', encodedRes.ok && (await encodedRes.text()).includes('在浏览器中查看'));
 
   const ws = await connectAuthedWs(hub);
   const gitWait = waitForWs(ws, (msg) => msg.type === 'git_status' && msg.threadId === threadId, 10000);
@@ -207,6 +242,46 @@ try {
   record('http suite crashed', false, err.message);
 } finally {
   stopHub(hub);
+}
+
+const expoPort = await freePort();
+const expoStub = http.createServer((_req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end('<html>expo-stub</html>');
+});
+await new Promise((resolve) => expoStub.listen(expoPort, '127.0.0.1', resolve));
+const expoHub = await startHub({
+  CODEX_HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'onedesk-codex-')),
+  ONEDESK_PASSWORD: 'lane-pass',
+  CODESK_EXPO_WEB_PORT: String(expoPort),
+});
+try {
+  const localHome = await fetch(`${expoHub.base}/`, { redirect: 'manual' });
+  record(
+    'local hub home redirects to expo web',
+    localHome.status === 302 && localHome.headers.get('location') === `http://127.0.0.1:${expoPort}/`,
+    `${localHome.status} ${localHome.headers.get('location') || ''}`,
+  );
+
+  const tunnelHome = await fetch(`${expoHub.base}/`, {
+    redirect: 'manual',
+    headers: {
+      Host: 'cds.example.com',
+      'CF-Connecting-IP': '203.0.113.10',
+      'X-Forwarded-Proto': 'https',
+    },
+  });
+  const tunnelLoc = tunnelHome.headers.get('location') || '';
+  record(
+    'cloudflare tunnel hub home does not redirect to loopback',
+    tunnelHome.status !== 302 && !/127\.0\.0\.1/.test(tunnelLoc),
+    `${tunnelHome.status} ${tunnelLoc}`,
+  );
+} catch (err) {
+  record('expo redirect suite crashed', false, err.message);
+} finally {
+  stopHub(expoHub);
+  await new Promise((resolve) => expoStub.close(resolve));
 }
 
 const failed = results.filter((row) => !row.ok);

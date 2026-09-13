@@ -2,7 +2,7 @@
 
 基线提交：`51afd95`（OneDesk 控制面：附件 / 技能 / MCP / 模型 / follower 发停）。
 
-产品总定义见 `docs/product/`。本文只管工作台体验包。中继 / 配对 / E2E 以产品定义为准。
+当前优先 Expo Web + Tailscale / 二维码，APK 专项后置；下文 PWA 实现记录仅作历史参考。产品总定义见 `docs/product/`。本文只管工作台体验包。中继 / 配对 / E2E 以产品定义为准。
 
 **2026-08-22 按代码核对：** 鉴权、时间线卡、`/` 菜单（PWA+Expo）、审批接线、pin/归档 sidecar、速度菜单、推理折叠已经在树上。PLAN 下文仍保留原设计，避免再当「没做」。现状表见 `docs/product/README.md`。
 
@@ -18,13 +18,14 @@
    - 出门 E2E — 已接线（须重新扫带 `hk=` 的码）
    - 斜杠 `/review` 等 — 已做
    - 只读 Git / `$ 命令` — 已做
+   - 交互终端（ConPTY + xterm）— Expo 右栏「终端」
    - 局域网口令登录 — 已做
    - 重命名 — 原本已有
     - 会话内搜索 — 已做（PWA overlay + Expo 更多菜单）
    - 极光 — Hub + 客户端登记已接；`android/` 已含 `JPUSH_APPKEY` 与通知权限。须用此工程重打 APK。Expo Go 收不到
 4. Desktop 持锁审批 — 已做：follow 直播 snapshot 优先、`kind` 可回退三种 follower 方法。本机仍建议开 Desktop 点一次确认「手机批完桌面继续跑」
 
-不要：官方 Remote、真 PTY、邮箱账号、把 Hub 打成绿色免 Node 包（本机已有 Node 即可）。
+安装包现状：`pack-hub.ps1` 会带上 `node.exe` 和 `node_modules`（含 `node-pty`）。打 zip 的机器需要能编 Windows 原生模块。
 
 ## 已有能力
 
@@ -34,7 +35,7 @@
 - Desktop 持锁：IPC follower 发 / steer / 停；审批优先用直播 JSON-RPC `requestId`（follow snapshot），JSONL 条目 id 只作兜底
 - Diff 卡、命令卡、子智能体（PWA）
 - `/` 菜单（PWA + Expo：`/review` `/plan` `/mcp` `/plugin` `/goal` 等）
-- `run_command` / `git_status`（PWA 右侧「Git & 终端」；Expo 右栏 Git / 命令）
+- `run_command` / `git_status` / `pty_*`（Expo 右栏：文件 / Git / 终端）
 - 技能开关、MCP 列表/reload（REST + WS `get_skills` / `get_mcp`）、模型 / 推理 / 速度、访问模式
 - 远程 pin / 归档（`pins.jsonl` / `archives.jsonl` sidecar，空闲物化到 Desktop）
 - 文件树预览、上传附件、会话内搜索、Web Push、额度条
@@ -53,15 +54,11 @@
 
 有鉴权后，局域网才敢开写操作。
 
-### 2. 命令面板（不是真 PTY）
+### 2. 命令面板 + 交互终端
 
-在当前 thread `cwd` 跑一条命令，stdout/stderr 经 WS 流回。
+一次命令：在当前 thread `cwd` 跑一条命令，stdout/stderr 经 WS `command_output` 流回（composer `$ `）。
 
-- `child_process.spawn`，跟随会话 cwd
-- 前端一个输出面板即可，不要 xterm + `node-pty` / ConPTY
-- 与第 4 项 Git 只读共用「本机跑命令」管道
-
-真交互终端（vim / resize / 多会话 PTY）单独立项，本包不做。
+交互终端：Hub `node-pty` / ConPTY 起 PowerShell；Expo 右栏 xterm，消息 `pty_open` / `pty_input` / `pty_resize` / `pty_close` / `pty_data` / `pty_exit`。与一次命令并存。
 
 ### 3. 时间线补齐
 
@@ -173,13 +170,7 @@ Hub 现状：
 
 ## 本包明确不做
 
-- 真 PTY / xterm
-- 官方 Remote Relay、Codex Cloud、IDE 扩展、企业 SSO
-- Plugin 市场 / MCP OAuth
-- Browser / Computer Use / Appshots 画面
-- Sites / Visualizations / 产物工作室
-- 行内评论审阅台、hunk 级 stage、PR 全流程
-- Worktree 开聊（命令面板稳定后再说）
+不要在中继上跑 Codex，不要把 `auth.json` 发到中继或前端。其余（官方 Remote、SSO、Plugin 市场、Browser Use 等）按需要再开，不再当禁令。
 
 ## 建议开工顺序
 
@@ -199,7 +190,7 @@ Hub 现状：
 | `apps/web-hub/server/index.js` | HTTP / WS / 审批路由 |
 | `apps/web-hub/server/ipc-client.js` | `codex-ipc` follower |
 | `apps/web-hub/server/appserver.js` | 本端 app-server |
-| `apps/web/app.js` | 旧 PWA 时间线（回退壳） |
+| `archive/web/app.js` | 旧 PWA 时间线（仅归档，不回退） |
 | `apps/mobile/` | 日常 UI（Expo Web `:18991` + APK） |
 | `tests/ipc/host-router-spike.mjs` | IPC 探针样板 |
 | `docs/ARCHITECTURE.md` | 控制面契约 |

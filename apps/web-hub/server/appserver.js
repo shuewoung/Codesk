@@ -8,20 +8,25 @@
 //  - writer-lock 冲突错误含 "already has an active writer"
 // 方法名/参数形状集中在本文件，协议漂移只改这里。
 // ----------------------------------------------------
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { APPROVAL_TTL_MS } from './turn-status.js';
+import { resolveCodexBinDir, REPO_CODEX_BIN_DIR } from './codex-bin.js';
 
 export { APPROVAL_TTL_MS };
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
+// codex.exe 目录解析（CODEX_BIN > 桌面最新 hash 目录 > 仓库 codex-bin），
+// 详见 codex-bin.js；CODEX_CLI_PATH 仍是 exe 级最高优先覆盖。
+export const CODEX_BIN_SELECTION = resolveCodexBinDir();
 export const DEFAULT_CODEX_EXE =
   process.env.CODEX_CLI_PATH ||
-  path.resolve(SERVER_DIR, '..', '..', '..', 'codex-bin', 'codex.exe');
+  path.join(CODEX_BIN_SELECTION.dir, 'codex.exe');
+export { REPO_CODEX_BIN_DIR };
 
 export const M = {
   INITIALIZE: 'initialize',
@@ -37,7 +42,64 @@ export const M = {
   MCP_STATUS_LIST: 'mcpServerStatus/list',
   MCP_RELOAD: 'config/mcpServer/reload',
   MODEL_LIST: 'model/list',
+  THREAD_SETTINGS_UPDATE: 'thread/settings/update',
 };
+
+// 与 Desktop 权限下拉对齐：ask/auto/full → approvalPolicy + permission profile id
+export const ACCESS_MODE_SETTINGS = {
+  ask: {
+    accessMode: 'ask',
+    approvalPolicy: 'on-request',
+    permissions: ':read-only',
+    sandboxPolicy: { type: 'readOnly', networkAccess: false },
+  },
+  auto: {
+    accessMode: 'auto',
+    approvalPolicy: 'on-request',
+    permissions: ':workspace',
+    sandboxPolicy: {
+      type: 'workspaceWrite',
+      networkAccess: false,
+      excludeTmpdirEnvVar: true,
+      excludeSlashTmp: true,
+    },
+  },
+  full: {
+    accessMode: 'full',
+    approvalPolicy: 'never',
+    permissions: ':danger-full-access',
+    sandboxPolicy: { type: 'dangerFullAccess' },
+  },
+};
+
+export function accessModeToThreadSettings(mode) {
+  const key = String(mode || '').toLowerCase();
+  return ACCESS_MODE_SETTINGS[key] || ACCESS_MODE_SETTINGS.full;
+}
+
+export function resolveThreadAccessSettings(opts = {}, fallback = ACCESS_MODE_SETTINGS.full) {
+  if (opts.accessMode) {
+    const base = accessModeToThreadSettings(opts.accessMode);
+    if (opts.approvalPolicy) return { ...base, approvalPolicy: opts.approvalPolicy };
+    return base;
+  }
+  const policy = opts.approvalPolicy == null ? '' : String(opts.approvalPolicy);
+  if (policy === 'untrusted') return { ...ACCESS_MODE_SETTINGS.ask, approvalPolicy: 'untrusted' };
+  if (policy === 'never') return ACCESS_MODE_SETTINGS.full;
+  if (policy === 'on-request') return ACCESS_MODE_SETTINGS.auto;
+  return fallback;
+}
+
+export function threadAccessParams(settings) {
+  if (!settings) return {};
+  // app-server 校验：permissions 与 sandboxPolicy 互斥。
+  // Desktop 对齐走 permission profile id（:read-only / :workspace / :danger-full-access），
+  // sandboxPolicy 只作内部对照，不要上 turn/start、thread/start、thread/settings/update。
+  const params = {};
+  if (settings.approvalPolicy != null) params.approvalPolicy = settings.approvalPolicy;
+  if (settings.permissions != null) params.permissions = settings.permissions;
+  return params;
+}
 
 // 会触发审批的服务端请求方法（新旧两代命名都监听）
 const APPROVAL_METHODS = new Set([
@@ -131,17 +193,18 @@ export class AppServerClient extends EventEmitter {
   }
 
   async ensureStarted() {
-    if (this.running) return this;
     if (this.startingPromise) return this.startingPromise;
-    this.startingPromise = this._start().finally(() => {
-      this.startingPromise = null;
+    if (this.running) return this;
+    const starting = this._start().finally(() => {
+      if (this.startingPromise === starting) this.startingPromise = null;
     });
+    this.startingPromise = starting;
     return this.startingPromise;
   }
 
   async _start() {
     if (!fs.existsSync(this.codexPath)) {
-      throw new AppServerError(`codex.exe 不存在: ${this.codexPath}（请设置 CODEX_CLI_PATH）`);
+      throw new AppServerError(`codex.exe 不存在: ${this.codexPath}（请设置 CODEX_BIN 指向 codex 目录，或 CODEX_CLI_PATH 指向 codex.exe）`);
     }
     const child = spawn(this.codexPath, ['app-server'], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -153,6 +216,7 @@ export class AppServerClient extends EventEmitter {
     let buf = '';
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
+      if (this.child !== child) return;
       buf += chunk;
       let idx;
       while ((idx = buf.indexOf('\n')) >= 0) {
@@ -168,22 +232,38 @@ export class AppServerClient extends EventEmitter {
     });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => this.emit('log', { stream: 'stderr', text: chunk.slice(0, 500) }));
-    child.on('exit', (code) => {
-      const err = new AppServerError(`app-server 已退出 (code=${code})`);
-      for (const [, p] of this.pending) {
-        clearTimeout(p.timer);
-        p.reject(err);
-      }
-      this.pending.clear();
-      this.child = null;
-      this.emit('exit', { code });
+    child.on('exit', (code) => this._disconnected(child, { code }));
+    child.on('error', (error) => this._disconnected(child, { error }));
+    child.stdin.on('error', (error) => {
+      if (this.child !== child) return;
+      this.stop();
+      this.emit('log', { stream: 'stdin', text: error.message });
     });
 
-    await this.request(
-      M.INITIALIZE,
-      { clientInfo: this.clientInfo, capabilities: this.capabilities },
-      { timeoutMs: 20000 }
-    );
+    try {
+      await this.request(
+        M.INITIALIZE,
+        { clientInfo: this.clientInfo, capabilities: this.capabilities },
+        { timeoutMs: 20000 }
+      );
+    } catch (error) {
+      if (this.child === child) this.stop();
+      throw error;
+    }
+  }
+
+  _disconnected(child, detail = {}) {
+    // A delayed exit from a stopped generation must not clear its replacement.
+    if (this.child !== child) return;
+    this.child = null;
+    this.startingPromise = null;
+    const err = new AppServerError(`app-server 已退出 (code=${detail.code ?? 'unknown'})`);
+    for (const p of this.pending.values()) {
+      clearTimeout(p.timer);
+      p.reject(err);
+    }
+    this.pending.clear();
+    this.emit('exit', detail);
   }
 
   _dispatch(msg) {
@@ -203,7 +283,7 @@ export class AppServerClient extends EventEmitter {
   }
 
   request(method, params, { timeoutMs = 120000 } = {}) {
-    if (!this.running && method !== M.INITIALIZE) {
+    if ((!this.running || this.startingPromise) && method !== M.INITIALIZE) {
       return this.ensureStarted().then(() => this.request(method, params, { timeoutMs }));
     }
     const id = this.nextId++;
@@ -239,11 +319,33 @@ export class AppServerClient extends EventEmitter {
     } catch (e) { /* 进程退出时的响应失败可忽略 */ }
   }
 
-  stop() {
-    if (this.child) {
-      try { this.child.kill(); } catch (e) { /* 忽略 */ }
-      this.child = null;
+  // Windows 兜底：codex.exe 可能派生子进程，child.kill() 只Terminate 直接子进程；
+  // 独立成方法便于测试注入（测试用假进程，不真正执行 taskkill）。
+  killProcessTree(pid) {
+    if (process.platform !== 'win32' || !pid) return false;
+    try {
+      execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
+      return true;
+    } catch (e) {
+      return false; // 进程可能已随 child.kill() 退出
     }
+  }
+
+  // 终止 app-server 子进程并清理全部请求/启动状态，保证下次 ensureStarted 干净重生。
+  stop() {
+    const child = this.child;
+    this.child = null;
+    this.startingPromise = null;
+    const err = new AppServerError('app-server 已停止');
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.reject(err);
+    }
+    this.pending.clear();
+    this.emit('exit', { reason: 'stopped' });
+    if (!child) return;
+    try { child.kill(); } catch (e) { /* 忽略 */ }
+    if (process.platform === 'win32' && child.pid) this.killProcessTree(child.pid);
   }
 }
 
@@ -260,6 +362,16 @@ export class CodexAppServer extends EventEmitter {
     this.ownedThreads = new Set(); // 本进程 resume/start 过的线程（我们持有 writer）
     this.pendingApprovals = new Map(); // appServerRequestId -> {threadId, method, payload, at}
     this.currentTurnByThread = new Map(); // threadId -> turnId（interrupt 用）
+    this.defaultAccessSettings = ACCESS_MODE_SETTINGS.full;
+    this.threadAccessSettings = new Map(); // threadId -> access settings for next turn/start
+    this.runtimeByThread = new Map();
+    this.runtimeRevisionByThread = new Map();
+    this.pendingUserInputs = new Map();
+    this.generation = 0;
+    this.client.on('exit', (detail) => {
+      this._clearRuntime('disconnected');
+      this.emit('exit', detail);
+    });
 
     this.client.on('server-request', (msg) => this._onServerRequest(msg));
     this.client.on('notification', (msg) => this._onNotification(msg));
@@ -272,8 +384,81 @@ export class CodexAppServer extends EventEmitter {
     return this.client.ensureStarted();
   }
 
+  setDefaultAccessMode(mode) {
+    this.defaultAccessSettings = accessModeToThreadSettings(mode);
+    for (const id of this.threadAccessSettings.keys()) {
+      this.threadAccessSettings.set(id, this.defaultAccessSettings);
+    }
+    return this.defaultAccessSettings;
+  }
+
+  rememberThreadAccess(threadId, settings) {
+    if (threadId && settings) this.threadAccessSettings.set(threadId, settings);
+  }
+
+  accessFor(threadId, opts = {}) {
+    return resolveThreadAccessSettings(
+      opts,
+      (threadId && this.threadAccessSettings.get(threadId)) || this.defaultAccessSettings
+    );
+  }
+
   get running() {
     return this.client.running;
+  }
+
+  _clearRuntime(reason) {
+    this.generation += 1;
+    for (const entry of [...this.pendingApprovals.values()]) this._closePending(entry, reason);
+    for (const entry of [...this.pendingUserInputs.values()]) this._closeUserInput(entry, reason);
+    this.ownedThreads.clear();
+    this.currentTurnByThread.clear();
+    this.runtimeByThread.clear();
+    this.runtimeRevisionByThread.clear();
+    this.threadAccessSettings.clear();
+  }
+
+  runtimeStatus(threadId) {
+    let status = this.runtimeByThread.get(threadId) || 'unknown';
+    if (this.currentTurnByThread.has(threadId)) status = 'working';
+    if ([...this.pendingApprovals.values()].some((p) => p.threadId === threadId)) status = 'waiting_approval';
+    if ([...this.pendingUserInputs.values()].some((p) => p.threadId === threadId && p.payload?.isBlocking !== false)) status = 'waiting_user_input';
+    return { known: status !== 'unknown', status, busy: status === 'unknown' ? null : status !== 'idle', source: 'appserver' };
+  }
+
+  _recordStatus(threadId, status) {
+    const type = typeof status === 'string' ? status : status?.type;
+    const value = type === 'active'
+      ? (status?.activeFlags?.includes('waitingOnApproval') ? 'waiting_approval'
+        : status?.activeFlags?.includes('waitingOnUserInput') ? 'waiting_user_input' : 'working')
+      : type === 'idle' ? 'idle' : 'unknown';
+    this.runtimeByThread.set(threadId, value);
+    if (value === 'idle') this.currentTurnByThread.delete(threadId);
+  }
+
+  _closeUserInput(entry, reason) {
+    clearTimeout(entry.timer);
+    this.pendingUserInputs.delete(String(entry.requestId));
+    this.emit('user-input-closed', { ...entry, reason });
+  }
+
+  respondUserInput(requestId, response) {
+    const entry = this.pendingUserInputs.get(String(requestId));
+    if (!entry) return { ok: false, code: 'not_found' };
+    if (Date.now() - entry.at > APPROVAL_TTL_MS) {
+      this.client.respondError(entry.requestId, 'user input timeout');
+      this._closeUserInput(entry, 'timeout');
+      return { ok: false, code: 'expired' };
+    }
+    const answers = response?.answers;
+    if (!answers || typeof answers !== 'object' || Array.isArray(answers)
+      || Object.values(answers).some((a) => !Array.isArray(a?.answers) || a.answers.some((v) => typeof v !== 'string'))
+      || (entry.payload?.questions || []).some((q) => !Object.hasOwn(answers, q.id))) {
+      return { ok: false, code: 'invalid_answers' };
+    }
+    this.client.respond(entry.requestId, { answers });
+    this._closeUserInput(entry, 'answered');
+    return { ok: true, requestId: entry.requestId, threadId: entry.threadId };
   }
 
   _threadIdOf(params) {
@@ -327,6 +512,8 @@ export class CodexAppServer extends EventEmitter {
         at: Date.now(),
         timer: null,
       };
+      const previous = this.pendingApprovals.get(String(requestId));
+      if (previous) this._closePending(previous, 'replaced');
       this.pendingApprovals.set(String(requestId), entry);
       const timer = setTimeout(() => {
         if (this.pendingApprovals.get(String(requestId)) !== entry) return;
@@ -336,23 +523,51 @@ export class CodexAppServer extends EventEmitter {
       timer.unref?.();
       entry.timer = timer;
 
-      const decide = (decision) => this.decideApproval(String(requestId), decision);
+      const decide = (decision) => this.pendingApprovals.get(String(requestId)) === entry
+        ? this.decideApproval(String(requestId), decision)
+        : { ok: false, code: 'not_found' };
       this.emit('approval', { ...entry, ids: this._approvalIds(entry), decide });
       if (threadId) this.emit('thread-activity', { threadId, method: msg.method });
       return;
     }
-    // 未识别的服务端请求：空结果确认，避免对端悬挂
-    this.client.respond(msg.id, {});
+    if (msg.method === 'item/tool/requestUserInput') {
+      const entry = { requestId: msg.id, method: msg.method, threadId: this._threadIdOf(msg.params), payload: msg.params, at: Date.now() };
+      const previous = this.pendingUserInputs.get(String(msg.id));
+      if (previous) this._closeUserInput(previous, 'replaced');
+      const timer = setTimeout(() => {
+        if (this.pendingUserInputs.get(String(msg.id)) !== entry) return;
+        this.client.respondError(msg.id, 'user input timeout');
+        this._closeUserInput(entry, 'timeout');
+      }, APPROVAL_TTL_MS);
+      timer.unref?.();
+      Object.defineProperty(entry, 'timer', { value: timer });
+      this.pendingUserInputs.set(String(msg.id), entry);
+      this.emit('user-input', entry);
+      return;
+    }
+    // Do not acknowledge unsupported interactive requests with a bogus success.
+    this.client.respondError(msg.id, `unsupported server request: ${msg.method}`);
   }
 
   _onNotification(msg) {
     const threadId = this._threadIdOf(msg.params);
     const method = String(msg.method || '');
     const turnId = msg.params?.turn?.id || msg.params?.turnId;
+    if (threadId && ['thread/status/changed', 'turn/started', 'turn/completed', 'turn/interrupted'].includes(method)) {
+      this.runtimeRevisionByThread.set(threadId, (this.runtimeRevisionByThread.get(threadId) || 0) + 1);
+    }
+    if (threadId && method === 'thread/status/changed') this._recordStatus(threadId, msg.params?.status);
     if (threadId && method === 'turn/started' && turnId) {
       this.currentTurnByThread.set(threadId, turnId);
-    } else if (threadId && /turn\/(completed|interrupted)|error/i.test(method)) {
-      this.currentTurnByThread.delete(threadId);
+      this.runtimeByThread.set(threadId, 'working');
+    } else if (threadId && (method === 'turn/completed' || method === 'turn/interrupted')) {
+      // A late completion for an older turn cannot clear a newer active turn.
+      if (!turnId || !this.currentTurnByThread.has(threadId) || this.currentTurnByThread.get(threadId) === turnId) {
+        this.currentTurnByThread.delete(threadId);
+        this.runtimeByThread.set(threadId, 'idle');
+        for (const entry of [...this.pendingApprovals.values()]) if (entry.threadId === threadId) this._closePending(entry, 'turn_completed');
+        for (const entry of [...this.pendingUserInputs.values()]) if (entry.threadId === threadId) this._closeUserInput(entry, 'turn_completed');
+      }
     }
     if (threadId) this.emit('thread-activity', { threadId, method: msg.method });
   }
@@ -368,14 +583,15 @@ export class CodexAppServer extends EventEmitter {
   }
 
   // —— 写（需 writer）——
-  async startThread({ cwd, approvalPolicy = null } = {}) {
+  async startThread({ cwd, approvalPolicy = null, accessMode = null } = {}) {
+    const access = this.accessFor(null, { accessMode, approvalPolicy });
+    const generation = this.generation;
     const r = await this.client.request(
       M.THREAD_START,
       {
         modelProvider: null,
         cwd: cwd || process.cwd(),
-        approvalPolicy,
-        permissions: null,
+        ...threadAccessParams(access),
         runtimeWorkspaceRoots: cwd ? [cwd] : [],
         config: null,
         personality: null,
@@ -387,7 +603,12 @@ export class CodexAppServer extends EventEmitter {
       { timeoutMs: 60000 }
     );
     const threadId = r?.thread?.id;
-    if (threadId) this.ownedThreads.add(threadId);
+    if (generation !== this.generation) throw new AppServerError('app-server connection changed');
+    if (threadId) {
+      this.ownedThreads.add(threadId);
+      if (!this.runtimeRevisionByThread.has(threadId)) this._recordStatus(threadId, r.thread.status);
+      this.rememberThreadAccess(threadId, access);
+    }
     return r;
   }
 
@@ -400,21 +621,45 @@ export class CodexAppServer extends EventEmitter {
       modelProvider: null,
     };
     if (cwd) params.cwd = cwd;
+    const generation = this.generation;
+    const revision = this.runtimeRevisionByThread.get(threadId) || 0;
     const r = await this.client.request(M.THREAD_RESUME, params, { timeoutMs: 60000 });
+    if (generation !== this.generation) throw new AppServerError('app-server connection changed');
     this.ownedThreads.add(threadId);
+    if ((this.runtimeRevisionByThread.get(threadId) || 0) === revision) this._recordStatus(threadId, r?.thread?.status);
+    if (!this.threadAccessSettings.has(threadId)) {
+      this.rememberThreadAccess(threadId, this.defaultAccessSettings);
+    }
     return r;
   }
 
-  async sendUserTurn({ threadId, text, input = null, cwd = null, model = null, effort = null, collaborationMode = null }) {
+  async updateThreadSettings(threadId, settings) {
+    if (!threadId || !settings) return null;
+    const access = settings.permissions
+      ? settings
+      : this.accessFor(threadId, settings);
+    this.rememberThreadAccess(threadId, access);
+    await this.ensureStarted();
+    return this.client.request(
+      M.THREAD_SETTINGS_UPDATE,
+      { threadId, ...threadAccessParams(access) },
+      { timeoutMs: 15000 }
+    );
+  }
+
+  async sendUserTurn({ threadId, text, input = null, cwd = null, model = null, effort = null, collaborationMode = null, accessMode = null, approvalPolicy = null, clientUserMessageId = crypto.randomUUID() }) {
+    const generation = this.generation;
+    this.runtimeByThread.set(threadId, 'unknown');
+    const access = this.accessFor(threadId, { accessMode, approvalPolicy });
+    this.rememberThreadAccess(threadId, access);
     const r = await this.client.request(
       M.TURN_START,
       {
         threadId,
-        clientUserMessageId: crypto.randomUUID(),
+        clientUserMessageId,
         input: normalizeInput(input, text),
         cwd,
-        approvalPolicy: null,
-        permissions: null,
+        ...threadAccessParams(access),
         runtimeWorkspaceRoots: [],
         model,
         effort,
@@ -426,17 +671,27 @@ export class CodexAppServer extends EventEmitter {
       },
       { timeoutMs: 120000 }
     );
+    if (generation !== this.generation) throw new AppServerError('app-server connection changed');
     const turnId = r?.turn?.id;
-    if (turnId) this.currentTurnByThread.set(threadId, turnId);
+    const terminal = ['completed', 'interrupted', 'failed'].includes(r?.turn?.status);
+    if (terminal && (!this.currentTurnByThread.has(threadId) || this.currentTurnByThread.get(threadId) === turnId)) {
+      this.currentTurnByThread.delete(threadId);
+      this.runtimeByThread.set(threadId, 'idle');
+    }
+    if (turnId && !terminal && this.runtimeByThread.get(threadId) !== 'idle'
+      && (!this.currentTurnByThread.has(threadId) || this.currentTurnByThread.get(threadId) === turnId)) {
+      this.currentTurnByThread.set(threadId, turnId);
+      this.runtimeByThread.set(threadId, 'working');
+    }
     return r;
   }
 
-  async steerTurn({ threadId, text, input = null, expectedTurnId = null }) {
+  async steerTurn({ threadId, text, input = null, expectedTurnId = null, clientUserMessageId = crypto.randomUUID() }) {
     return this.client.request(
       M.TURN_STEER,
       {
         threadId,
-        clientUserMessageId: crypto.randomUUID(),
+        clientUserMessageId,
         input: normalizeInput(input, text),
         expectedTurnId,
       },
@@ -522,7 +777,17 @@ export class CodexAppServer extends EventEmitter {
     return models;
   }
 
-  stop() {
+  // 释放 Hub 持有的全部写入权：终止 app-server 子进程并清空会话状态
+  // （ownedThreads / currentTurnByThread / 待审批 / 各线程 access 记忆），
+  // 之后 running 为 false，下次 ensureStarted 会重新 spawn + initialize 干净重生。
+  releaseAll() {
+    const ownedCount = this.ownedThreads.size;
+    this._clearRuntime('released');
     this.client.stop();
+    this.emit('released', { ownedThreads: ownedCount });
+  }
+
+  stop() {
+    this.releaseAll();
   }
 }

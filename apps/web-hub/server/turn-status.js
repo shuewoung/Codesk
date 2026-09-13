@@ -3,10 +3,23 @@ import fs from 'node:fs';
 export const APPROVAL_TTL_MS = 10 * 60 * 1000;
 export const ACTIVE_FRESH_MS = 120 * 1000;
 
-export function threadLooksLive(tail, stats, now = Date.now()) {
+export function threadLooksLive(tail, stats, now = Date.now(), runtime = null) {
+  if (runtime?.known && typeof runtime.busy === 'boolean') return runtime.busy;
   if (!tail || !tail.open) return false;
   const mtime = stats && Number(stats.mtimeMs);
   return Number.isFinite(mtime) && now - mtime < ACTIVE_FRESH_MS;
+}
+
+// The caller selects the actual owner's runtime (local or IPC). Unknown is
+// intentionally retained for safety decisions; rollout is only a UI heuristic.
+export function getExecutionState({ runtime = null, tail = null, stats = null, now = Date.now() } = {}) {
+  if (runtime?.known && typeof runtime.busy === 'boolean') return runtime;
+  return {
+    known: false,
+    busy: null,
+    status: threadLooksLive(tail, stats, now) ? 'working' : 'unknown',
+    source: 'rollout_heuristic',
+  };
 }
 
 export function hasOpenDelegatedAgent(openCalls) {
@@ -22,7 +35,12 @@ export function resolveLiveStatus(parsedStatus, {
   tail = null,
   stats = null,
   now = Date.now(),
+  runtime = null,
 } = {}) {
+  if (runtime?.known && typeof runtime.busy === 'boolean') {
+    if (runtime.busy) return runtime.status || 'working';
+    return hasLiveChildren ? 'working' : 'idle';
+  }
   if (parsedStatus === 'waiting_approval') return 'waiting_approval';
   if (hasLiveChildren || threadLooksLive(tail, stats, now)) return 'working';
   if (parsedStatus === 'working') return 'idle';
@@ -58,6 +76,25 @@ export function isNonUserThreadRecord(threadSource, source) {
   if (!src || src === 'vscode') return false;
   if (src === 'exec') return true;
   return Boolean(parseThreadSpawn(src)) || src !== 'vscode';
+}
+
+export function threadIdFromRolloutName(fileName) {
+  const text = String(fileName || '');
+  const re = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+  let last = '';
+  let m;
+  while ((m = re.exec(text))) last = m[0];
+  // 子智能体文件是 rollout-<ts>-<parent>_<child>.jsonl，取最后一个 UUID
+  return last ? last.toLowerCase() : '';
+}
+
+const HISTORY_ITEM_SKIP = new Set([
+  'thread_settings_applied',
+  'token_count',
+]);
+
+export function keepHistoryItemPayload(payloadType) {
+  return !HISTORY_ITEM_SKIP.has(String(payloadType || ''));
 }
 
 export function isApprovalExpired(pending, now = Date.now()) {

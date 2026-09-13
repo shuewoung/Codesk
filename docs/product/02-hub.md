@@ -9,13 +9,14 @@
 - 读：`~/.codex`（sqlite / JSONL / 锁 / 桌面目录）
 - 写：空闲走本端 `codex.exe app-server`；Desktop/VSCode 持锁走 `codex-ipc` follower
 - 远程 pin / 归档：先追加 `pins.jsonl` / `archives.jsonl` sidecar；Desktop 空闲（无 live turn / 无新鲜 writer-lock / 进程最好已退出）再物化 `.codex-global-state.json` 与 sqlite。禁止抢 turn writer。客户端应提示「已记下，电脑空闲时写入桌面」
-- 给局域网提供静态 Web + REST + WS（`:18990`）。日常若本机 `:18991` Expo Web 在跑，`/` 302 过去；否则静态根优先 `apps/mobile/dist-web`，再回退 `apps/web` 旧 PWA（挂在 18990，不再更新）
+- 给局域网提供静态 Web + REST + WS（`:18990`）。日常若本机 `:18991` Expo Web 在跑，**本机**打开 `/` 302 过去；Cloudflare Tunnel / 非回环请求禁止 302 到 `127.0.0.1`，继续托管静态根。静态根为 `apps/mobile/dist-web`（打包后 `public/`）；旧 PWA 已归档，缺导出时明确报错，不回退
 - **出站**连 VPS，把已鉴权的业务消息原样转发
-- 本机口令；向中继申请一次性**出门码**
-- Cloudflare Tunnel + Zero Trust：请求从 `127.0.0.1` 进来但带转发头时，按远程处理，要口令 Cookie。对话图片走同源 `GET /api/file?raw=1`，不经中继。
+- 本机口令；向中继获取长期**出门配对码**
+- Cloudflare Tunnel + Zero Trust：请求从 `127.0.0.1` 进来但带转发头时，按远程处理，要口令 Cookie。对话里的本机文件 / 目录 / 图片走同源 `GET /api/file?raw=1`，不经中继。Office 预览读同目录 `.web-preview/`。
 - 本机主机台（仅 127.0.0.1）：**左家里 / 右出门**、已连接客户端、踢人
-- 家里码（`lanCode`）常驻 4 位字母或数字，可在主机台自己设置或换一个。只用于 `POST /api/auth/login`。出门码是中继一次性码，只用于 `POST /api/relay/pair`。UI 禁止把两个码画成同一个
-- 命令面板、只读 Git、follower 审批（见 `docs/PLAN.md`）都在这一侧实现
+- 家里码（`lanCode`）常驻 4 位字母或数字，可在主机台自己设置或换一个。只用于 `POST /api/auth/login`。出门码是中继长期配对码，可手动撤销，只用于 `POST /api/relay/pair`。UI 禁止把两个码画成同一个
+- 命令面板、只读 Git、交互终端（ConPTY）、follower 审批都在这一侧实现
+- 用量：本机读 `~/.codex/auth.json` 的 access_token 调 ChatGPT usage，只下发 `quota` 百分比 / 套餐，不把文件或 token 发出去
 
 ## 窗口 2 负责
 
@@ -28,10 +29,9 @@
 
 ## 不准做
 
-- 不要把 `auth.json` 或 access token 发给中继 / 前端
+- 不要把 `auth.json` 或 access token 发给中继 / 前端（本机读用量可以）
 - 不要在中继上 resume 别人的 thread
-- 不要改 `apps/web/` 外观（协议字段除外，先改 `04-protocol.md`）。`apps/web-hub/public/` 只是打包/旧路径回退，不要当主源改。
-- 不要做 macOS/Linux Hub
+- 不要恢复归档 PWA。前端源码在 `apps/mobile/`，主机台与必要图标在 `apps/web-hub/assets/`；`public/` 仅为打包产物。
 
 ## 身份
 

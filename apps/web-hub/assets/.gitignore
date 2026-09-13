@@ -1,0 +1,4 @@
+# Active host console resources, not generated pages or archived PWA files.
+!host.html
+!favicon-192.png
+!icons/codesk-app.png

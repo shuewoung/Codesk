@@ -624,6 +624,21 @@ html, body {
   background: rgba(13, 148, 136, 0.12);
 }
 
+/* 新建会话中：目标项目文件夹高亮 + 蓝色徽章 */
+.folder-status-badge.badge-creating {
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.14);
+}
+
+.folder-status-badge .dot-blue {
+  background: #2563eb;
+}
+
+.project-folder.creating > .project-folder-header {
+  background: rgba(37, 99, 235, 0.08);
+  border-radius: 8px;
+}
+
 .status-pulse-dot {
   display: inline-block;
   width: 6px;

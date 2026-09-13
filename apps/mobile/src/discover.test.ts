@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canLanProbe, candidateHubUrls, HUB_PORT, isColocatedWebShell, isPrivateIPv4, isPublicPageHost, isRelayPageHost, normalizeHubUrl, pageHubUrl, sameHostHubUrl } from './discover';
+import { canLanProbe, candidateHubUrls, HUB_PORT, hubUrlForPage, isColocatedWebShell, isPrivateIPv4, isPublicPageHost, isRelayPageHost, normalizeHubUrl, pageHubUrl, sameHostHubUrl } from './discover';
 
 test('normalizeHubUrl uses http for lan and loopback', () => {
   assert.equal(normalizeHubUrl('127.0.0.1:18990'), 'http://127.0.0.1:18990');
@@ -90,6 +90,14 @@ test('sameHostHubUrl uses the page host and hub port', () => {
     protocol: 'https:',
     origin: 'https://cds.zhangsw.work',
   }), 'https://cds.zhangsw.work');
+  assert.equal(pageHubUrl({
+    hostname: 'codex.zhangsw.work',
+    port: '',
+    protocol: 'https:',
+    origin: 'https://codex.zhangsw.work',
+  }), 'https://codex.zhangsw.work');
+  assert.equal(hubUrlForPage('https://codex.zhangsw.work:18990', 'https://codex.zhangsw.work'), 'https://codex.zhangsw.work');
+  assert.equal(hubUrlForPage('http://192.168.1.8:18990', 'http://192.168.1.8:18991'), 'http://192.168.1.8:18990');
   assert.equal(isColocatedWebShell({ os: 'web', hostname: 'localhost', port: '18991' }), true);
   assert.equal(isColocatedWebShell({ os: 'web', hostname: '100.66.1.5', port: '18991' }), true);
   assert.equal(isColocatedWebShell({ os: 'web', hostname: 'hub.codesk.icu' }), false);

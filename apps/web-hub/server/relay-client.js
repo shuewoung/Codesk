@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import { anonymousBox, anonymousOpen, boxTo, secretOpen, secretSeal } from './e2e.js';
+import { anonymousBox, anonymousOpen, secretOpen, secretSeal } from './e2e.js';
 
 const FORBIDDEN = /auth\.json|access_token|refresh_token|id_token/i;
 
@@ -134,38 +134,48 @@ export function createRelayClient({
       emitState();
       return;
     }
+    if (msg.deviceId != null && (typeof msg.deviceId !== 'string' || !msg.deviceId.trim())) return;
+    const target = msg.deviceId ? { deviceId: msg.deviceId } : {};
+    const replyError = (code, message) => sendRaw(pack('error', { code, message }, target));
     if (msg.type === 'e2e_hello') {
-      const boxed = anonymousOpen(msg.payload, identity.e2ePriv);
-      const devicePub = boxed?.devicePub || msg.payload?.devicePub || '';
-      if (!devicePub) {
-        console.warn('[relay] e2e_hello missing devicePub');
-        sendRaw(pack('error', { code: 'e2e_hello_bad', message: 'e2e handshake failed' }));
-        return;
-      }
       try {
+        const payload = msg.payload;
+        // Legacy clients without hk send only devicePub. Preserve that path, but
+        // never downgrade a failed/partial encrypted hello to its cleartext hint.
+        const hasBox = payload && ['ct', 'n', 'ephPub'].some((key) => Object.hasOwn(payload, key));
+        const hello = hasBox ? anonymousOpen(payload, identity.e2ePriv) : payload;
+        const devicePub = hello?.devicePub;
+        if (typeof devicePub !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(devicePub)) {
+          throw new Error('invalid device public key');
+        }
         const welcome = anonymousBox(
           { contentKey: identity.contentKey, keyId: identity.keyId, hubPub: identity.e2ePub },
           devicePub,
         );
-        sendRaw(pack('e2e_welcome', welcome));
+        sendRaw(pack('e2e_welcome', welcome, target));
         console.log('[relay] e2e_welcome sent');
       } catch (err) {
         console.warn(`[relay] e2e_welcome failed: ${err instanceof Error ? err.message : err}`);
-        sendRaw(pack('error', { code: 'e2e_hello_bad', message: 'e2e handshake failed' }));
+        replyError('e2e_hello_bad', 'e2e handshake failed');
       }
       return;
     }
     if (msg.type === 'fwd') {
       if (msg.enc) {
-        const app = secretOpen(msg.enc, identity.contentKey);
-        if (!app || typeof app !== 'object') {
-          sendRaw(pack('error', { code: 'e2e_required', message: 'please pair again' }));
+        let app;
+        try { app = secretOpen(msg.enc, identity.contentKey); } catch { /* invalid box */ }
+        if (!app || typeof app !== 'object' || Array.isArray(app)) {
+          replyError('e2e_required', 'please pair again');
+          return;
+        }
+        if ((app.type === 'download_file' || app.type === 'cancel_download') && !msg.deviceId) {
+          replyError('device_required', 'download requires authenticated device identity');
           return;
         }
         onFwd?.({ ...msg, payload: app });
         return;
       }
-      sendRaw(pack('error', { code: 'e2e_required', message: 'please pair again' }));
+      replyError('e2e_required', 'please pair again');
       return;
     }
     if (msg.type === 'error') {
@@ -249,7 +259,7 @@ export function createRelayClient({
     publicUrl() {
       return httpUrl || null;
     },
-    requestPairCode(timeoutMs = 8000) {
+    requestPairCode(timeoutMs = 8000, refresh = false) {
       if (!wsUrl || !online) return Promise.resolve({ code: null, expiresAtMs: null, relayOnline: false });
       return new Promise((resolve) => {
         const timer = setTimeout(() => {
@@ -262,7 +272,7 @@ export function createRelayClient({
             resolve({ ...value, relayOnline: online });
           },
         };
-        if (!sendRaw(pack('request_pair_code', { hubE2ePub: identity.e2ePub || '' }))) {
+        if (!sendRaw(pack('request_pair_code', { hubE2ePub: identity.e2ePub || '', refresh }))) {
           clearTimeout(timer);
           pairWaiter = null;
           resolve({ code: null, expiresAtMs: null, relayOnline: false });
@@ -271,6 +281,8 @@ export function createRelayClient({
     },
     forwardApp(appMsg, { deviceId = null } = {}) {
       if (!appMsg || appMsg.type === 'ping') return false;
+      if (deviceId != null && (typeof deviceId !== 'string' || !deviceId.trim())) return false;
+      if (String(appMsg.type || '').startsWith('download_') && !deviceId) return false;
       if (envelopeHasSecrets(appMsg)) {
         throw new Error('refusing to send credential-like payload to relay');
       }

@@ -1,52 +1,50 @@
 # Codesk Hub
 
-本目录是仓库产品 UI。架构与启动见仓库根 `README.md` 和 `docs/`。
+本目录是本机 Hub 服务及主机台资源。活跃产品 UI 在 `apps/mobile/`（Expo Web）；旧 PWA 已归档，不再托管。架构与启动见仓库根 `README.md` 和 `docs/`。
 
-> **专为移动端（手机、平板）与远程 Web 打造的高性能、真原生 PWA 体验的 Codex Desktop 远程控制与会话管理中心。**
+> **优先通过 Tailscale / WiFi 直连 Expo Web，也可使用中继长期二维码配对。APK 专项后置。**
 
-![Version](https://img.shields.org/badge/version-v3.7.0-blue.svg)
+版本以本目录 `package.json` 与本机 `/api/host/status` 返回值为准。
 ![Platform](https://img.shields.org/badge/platform-Windows%20%7C%20iOS%20%7C%20Android%20%7C%20iPadOS-orange.svg)
 ![License](https://img.shields.org/badge/license-MIT-green.svg)
 
 ---
 
-## ✨ 核心特性
+## 核心特性
 
-- 📱 **真原生 PWA App 模式**：符合 PWA 最高规格标准，内置 `sw.js` (Service Worker) 预缓存 App Shell。添加到主屏幕后**完全消除地址栏与 Tab 页**，极致模拟 iOS/Android 原生 App 体验。
-- 🎨 **黑金 OpenAI 视觉设计系统**：高度还原 OpenAI 暖金视觉与 Codex 官方设计语言，支持自适应像素级圆环 Token 用量仪表盘与呼吸灯运行状态指示（`🟢 运行中`）。
-- ⚡ **微秒级双重内存缓存 (Dual Memory Engine)**：
-  - 前端 `clientThreadCache` 内存池，切换 Session 耗时 **< 5ms**；
-  - 前端 `markdownCache` 编译缓存，已渲染过的 Markdown 文本 **0ms 秒开**；
-  - 服务端尾部倒序 Chunk 解析，即便遇到 **50MB** 的特大日志文件，读取耗时依然锁定在 **< 3ms**。
-- 🚀 **保底呈现最新 20~30 条完整对话**：首次打开即刻保证呈现最新的 250~300 条底层记录，确保至少展现 20~30 条完整 User 用户指令与 Assistant 回复卡片。
-- 🔄 **1 分钟后台无感静默刷新**：后台每隔 60 秒静默更新会话状态与账号限额卡片，零白屏、零闪烁、零滚动条跳动。
-- 📐 **移动端自适应抽屉与视口锁**：针对 iOS/Android 虚拟键盘与屏幕凹槽（Safe Area Insets）进行了深度像素级适配，右侧项目文件树抽屉支持触控滑动展开/收起。
+- Expo Web 单源：开发时使用 Metro，日常远程使用静态导出，不依赖旧 Service Worker。
+- Hub 提供会话、文件、审批、Git 与终端协议；与 Codex Desktop 共用会话，不抢活跃 writer。
+- 固定 4 字符家里码用于 WiFi / Tailscale；中继二维码与设备连接长期保留，手动撤销。
 
 ---
 
 ## 🛠️ 环境要求
 
 - **操作系统**：Windows 10 / 11 (运行 Codex Desktop 的机器)
-- **Node.js 运行时**：Node.js v18.0.0 或更高版本
-- **依赖说明**：仅包含唯一的超轻量依赖 `ws` (WebSocket)
+- **安装用户**：官网 Windows 包内置 Node 与生产依赖，无需系统 Node/npm
+- **源码开发**：自行准备符合 Hub `package.json` 与 Expo 要求的 Node.js/npm；以下快速开始仅针对源码
+- **依赖说明**：以 `package.json` / `package-lock.json` 为准；源码使用 `npm ci` 安装，终端需 `node-pty`
 
 ---
 
 ## 🚀 快速开始
 
 ### 1. 安装依赖
-在项目根目录下打开终端，执行：
+在仓库根目录下打开终端，执行：
 ```bash
-npm install
+npm ci --prefix apps/web-hub
+npm ci --prefix apps/mobile
+npm run export:web --prefix apps/mobile
 ```
 
 ### 2. 启动服务
 #### 方式 A：标准命令行启动
 ```bash
+cd apps/web-hub
 node server/index.js
 ```
 #### 方式 B：双击脚本启动 (后台守护模式)
-双击运行 `start-remote-hub.cmd` 即可启动服务并开启自动端口占用清理与守护。
+双击仓库 `scripts/start-web-hub.cmd`。启动器生成 `CODESK_LAUNCH_ID`，检查本机状态的版本、launchId、instanceId 与新子进程 PID；不把已有健康实例当成本次成功。明确使用 `scripts/start-web-hub.ps1 -Restart` 重启时只停止本仓绝对入口进程，端口被未知实例占用时提示人工处理，不自动清端口。
 
 ### 3. 访问端口
 服务默认绑定在端口 **`18990`**：
@@ -56,40 +54,29 @@ node server/index.js
 
 ---
 
-## 📱 手机与平板 PWA 无地址栏安装指南
+## 手机与平板 Expo Web
 
-为了获得**彻底消除浏览器地址栏与 Tab 栏**的真原生手机 App 体验，请按照以下步骤安装：
-
-### iOS / iPadOS (Safari)
-1. 在 Safari 浏览器中打开 `http://<您的IP>:18990`；
-2. 点击底部/顶部的 **“分享” 按钮 (⬆️)**；
-3. 向下滚动并选择 **“添加到主屏幕”**；
-4. 返回桌面，点击全新的 **Codex Remote** 黄色 OpenAI 图标即可全屏无缝使用！
-
-### Android (Chrome / Edge)
-1. 在 Chrome 浏览器中打开 `http://<您的IP>:18990`；
-2. 点击右上角 **“菜单” 按钮 (⋮)**；
-3. 选择 **“安装应用”** 或 **“添加到主屏幕”**；
-4. 即可在桌面生成独立全屏应用窗口。
+1. 电脑和手机连接同一 tailnet（或同一 WiFi），保持 Hub 在线。
+2. 本机打开 `http://127.0.0.1:18990/host`，扫描左侧直连二维码，或在手机浏览器打开对应地址。
+3. 输入固定 4 字符家里码。无需 APK，也不要求安装旧 PWA；不承诺离线或无地址栏模式。
+4. 使用中继时扫描右侧长期配对二维码；已连接设备可在主机台撤销。
 
 ---
 
 ## 📂 项目文件目录结构
 
-**前端 UI 单源目录（只维护这一个）**：`apps/web/`
+**前端 UI 单源目录**：`apps/mobile/`
 
 ```text
-apps/
-├── web/                       # ← 浏览器/PWA 多端一致版唯一维护目录
-│   ├── index.html
-│   ├── app.js
-│   ├── style.css
-│   └── ...
-└── web-hub/
-    ├── server/
-    │   └── index.js           # 后端（会自动优先加载 ../web 作为静态资源）
-    └── public/                # 过渡期副本（可删）
+apps/mobile/                 # Expo 客户端源码
+apps/mobile/dist-web/        # export:web 生成，Hub / Relay 托管
+apps/web-hub/server/         # Hub 后端
+apps/web-hub/assets/         # 活跃 host.html 和必需图标
+archive/web/                 # 旧 PWA，仅归档
+archive/web-hub-public/      # 旧 PWA 副本，仅归档
 ```
+
+`pack-hub.ps1` 使用唯一临时目录、按 lockfile 安装生产依赖；外部命令失败即终止，不复用旧导出。官网安装器解析一次目标稳定版本并使用固定 tag 下载，拒绝静默降级与包版本不符；先验证 staging，再切换目录。切换失败恢复旧目录，启动失败保留备份供人工回滚。托盘互斥锁冲突明确失败，默认中继遵循现有 `https://hub.codesk.icu:8787` 约定。完整恢复步骤见 [UPGRADING.md](../../docs/UPGRADING.md)。
 
 ---
 

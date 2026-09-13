@@ -2,11 +2,22 @@
 
 其他窗口先读本文，再动代码。协议仍以 [04-protocol.md](04-protocol.md) 为准。
 
+## 当前增量（2026-09-11：用户体验提升）
+
+- 计划、完成范围和验证限制以 [09-ux-improvements.md](09-ux-improvements.md) 为准，下文历史阶段描述不覆盖此增量。
+- 附件区分当前设备上传与宿主机引用；文件区分本次产物/会话已确认文件、项目目录和近期候选文档，复用通用类型图标。
+- 文件接口按已有会话根授权；新增 requestId/taskId 关联及原件下载协议，原件与预览分离并做 SHA-256 校验。旧截断 get_file 不是下载通道。
+- 请求超时不作空结果；断线可编辑不自动发送；上传回原会话草稿；列表统一搜索并虚拟化。
+- 退出须确认 LAN/Relay 设备凭据撤销，失败仅本地退出必须明示。配对码不是设备凭据。
+- Windows 安装固定目标 tag、拒绝静默降级，启动核对 launchId/版本；不复用未知实例。安装包内置 Node，源码开发另设环境。
+- 原生相机/分享、真实 Windows 升级及未完成的 GUI 路径不得标为已验收；本轮没有发布、重启真实 Hub 或操作真实凭据。
+
+
 ## 产品壳
 
-- 日常电脑 UI：**Expo Web `:18991`**（`cd apps/mobile && npx expo start --web --port 18991`）。Hub `:18990` 探测到 18991 会把 `/` 302 过去。没有 Metro 时托管 `apps/mobile/dist-web`，再没有才回退 `apps/web`。
-- 旧 PWA（`apps/web/`、`apps/web-hub/public/`）不删，仍可由 Hub `:18990` 托管；**不再更新**。新交互只改 Expo。
-- 出门客户端要装 **含 E2E + 极光占位符的新 APK**。旧包：会提示 `http://`、没有家里探测、Android 上 `no PRNG`、收不到极光。
+- 日常电脑 UI：**Expo Web `:18991`**（`cd apps/mobile && npx expo start --web --port 18991`）。Hub `:18990` 探测到 18991 时，**本机**打开 `/` 会 302 过去；经 Cloudflare Tunnel 或非回环进来的请求不要跳到 `127.0.0.1`，继续托管 `apps/mobile/dist-web`；缺导出时不回退旧 PWA。
+- 旧 PWA 已移到 `archive/web/`、`archive/web-hub-public/`，仅归档，不再托管。新交互只改 Expo；活跃主机台资源在 `apps/web-hub/assets/`。
+- 当前优先 Expo Web + Tailscale / 二维码，APK 与推送验收后置。原生专项需 **含 E2E + 极光占位符的新 APK**。旧包：会提示 `http://`、没有家里探测、Android 上 `no PRNG`、收不到极光。
 
 ## 两套码（禁止混用）
 
@@ -14,7 +25,7 @@
 |---|---|---|
 | 在哪看 | 主机台 **左边** | 主机台 **右边** |
 | 干什么 | 同一 WiFi 登录 Hub | `POST /api/relay/pair` |
-| 寿命 | 常驻 | 一次性 |
+| 寿命 | 固定 4 字符，手动更改 | 长期有效，手动撤销 |
 | App | 「连接家里」 | 「连接出门」/扫右边二维码 |
 
 一个输入框两用已经废止。手输出门码必须同时有 `hk`（扫码带 `hk=`）；只输 6 位出门码 E2E 不完整。
@@ -64,14 +75,14 @@
 
 ## 不要做
 
-改中继业务协议名、删 `public/app.js`、真 PTY、抄 Happy E2E/sync、提交密钥、把公网 IP 写进对外文档、用 Worker 包 `wss`。
+改中继业务协议名、恢复归档 PWA、抄 Happy E2E/sync、提交密钥、把公网 IP 写进对外文档。日常 UI 的交互终端走 Expo，不往旧 PWA 加。
 
 ---
 
 ## 窗口同步（2026-08-20：分发体系、软键盘适配与代码块复制）
 
 ### 1. 官网分发与版本检测体系 (`apps/www`)
-- **Windows 一键安装口令**：统一使用 `irm https://codesk.icu/install.ps1 | iex`，脚本位于 `apps/www/public/install.ps1`，自动检测 Node 环境并静默放行防火墙 18990 端口。
+- **Windows 一键安装口令**：统一使用 `irm https://codesk.icu/install.ps1 | iex`，脚本位于 `apps/www/public/install.ps1`，下载后先 staging 验证，再切换安装目录；切换失败恢复旧目录，启动失败保留备份供人工回滚。不自动修改防火墙。
 - **APK 直链下载**：官网直链提供 `https://codesk.icu/codesk-latest.apk`，国内网络环境下秒级下载，无需依赖 GitHub Releases。
 - **静态版本检测源**：`https://codesk.icu/version.json` 包含 `versionCode`、`version`、`changelog` 与 `downloadUrl`，零服务端代码、零额外服务器成本。
 

@@ -15,6 +15,8 @@ test('hub proxy forwards /api to hub', async () => {
   const hub = http.createServer((req, res) => {
     assert.equal(req.url, '/api/discover');
     assert.equal(String(req.headers['x-forwarded-for'] || '').length > 0, true);
+    assert.equal(String(req.headers.host || '').includes('127.0.0.1:18990'), false);
+    assert.equal(String(req.headers['x-forwarded-host'] || '').length > 0, true);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, hub: true }));
   });

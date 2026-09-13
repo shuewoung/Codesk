@@ -43,6 +43,9 @@ export function parseEnvelope(raw) {
   if (!isNonEmptyString(obj.type) || !ENVELOPE_TYPES.has(obj.type)) {
     throw new RelayError('bad_envelope', 'unknown envelope type');
   }
+  if (obj.deviceId != null && !isNonEmptyString(obj.deviceId)) {
+    throw new RelayError('bad_envelope', 'deviceId must be a non-empty string');
+  }
   const payload = obj.payload == null ? {} : obj.payload;
   return {
     v: 1,

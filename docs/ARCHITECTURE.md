@@ -2,7 +2,7 @@
 
 ## 本仓定位
 
-Codesk：本机已登录 Codex 的远程控制面。PWA 在 `apps/web/`，Hub 在 `apps/web-hub/server/`，Expo 在 `apps/mobile/`。多端拆分与中继定义见 `docs/product/`。
+Codesk：本机已登录 Codex 的远程控制面。旧 PWA 在 `archive/web/`（不托管），活跃主机台资源在 `apps/web-hub/assets/`，Hub 在 `apps/web-hub/server/`，Expo 在 `apps/mobile/`。多端拆分与中继定义见 `docs/product/`。
 
 | 层 | 实现 | 说明 |
 |---|---|---|
@@ -38,7 +38,7 @@ Codesk：本机已登录 Codex 的远程控制面。PWA 在 `apps/web/`，Hub �
 
 - **Broker**：逼桌面共用一个 app-server。仅当对端 Host 不在且用户明确要求时再考虑。
 - **CDP**：点桌面 DOM。不作为发送/停止主路径。
-- **官方 Remote Relay / auth.json**：不复制凭据，不调 `/wham/remote/control/*`。
+- **官方 Remote Relay**：不复制凭据，不调 `/wham/remote/control/*`。Hub 本机可读 `auth.json` 拉用量，不把 token 转发到中继或前端。
 
 ## 端口
 

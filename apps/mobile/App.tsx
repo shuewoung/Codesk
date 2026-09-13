@@ -30,9 +30,25 @@ function Root() {
   const [threadId, setThreadId] = useState<string | undefined>();
   const [left, setLeft] = useState(false);
   const [right, setRight] = useState(false);
+  // 新建会话乐观切换：点新建立即进入"新会话"视图，thread_created 到达后自动切到真实会话
+  const [pendingCreate, setPendingCreate] = useState<{ cwd: string; projectName: string } | null>(null);
+  const pendingCreateRef = useRef(false);
 
   const { width } = useWindowDimensions();
   const isWide = width >= 1100;
+
+  const beginCreateThread = useCallback((cwd: string, projectName: string) => {
+    if (pendingCreateRef.current) return; // 创建中防连点
+    pendingCreateRef.current = true;
+    setPendingCreate({ cwd, projectName });
+    setThreadId(undefined); // 宽屏立即显示"新会话"视图；建好后由 lastCreatedId 切入真实会话
+    session.createThread(cwd);
+  }, [session]);
+
+  const clearPendingCreate = useCallback(() => {
+    pendingCreateRef.current = false;
+    setPendingCreate(null);
+  }, []);
 
   const selectThread = useCallback((id: string) => {
     pendingUrlRef.current = '';
@@ -62,7 +78,7 @@ function Root() {
       setHoldUrlThread(false);
       return;
     }
-    if (isWide && !threadId && session.threads[0]) setThreadId(session.threads[0].id);
+    if (isWide && !threadId && session.threads[0] && !pendingCreateRef.current) setThreadId(session.threads[0].id);
   }, [session.hydrated, session.paired, session.threads, session.conn, threadId, isWide]);
 
   useEffect(() => {
@@ -70,8 +86,16 @@ function Root() {
     if (session.lastCreatedId) {
       selectThread(session.lastCreatedId);
       if (!isWide) setLeft(false);
+      clearPendingCreate();
     }
-  }, [session.lastCreatedId, isWide, selectThread]);
+  }, [session.lastCreatedId, isWide, selectThread, clearPendingCreate]);
+
+  // 创建超时兜底：15 秒未收到 thread_created 就撤下"新建中"状态，避免卡死
+  useEffect(() => {
+    if (!pendingCreate) return;
+    const timer = setTimeout(clearPendingCreate, 15000);
+    return () => clearTimeout(timer);
+  }, [pendingCreate, clearPendingCreate]);
 
   useEffect(() => subscribeJpushOpens((id) => {
     selectThread(id);
@@ -136,7 +160,7 @@ function Root() {
         onScan={() => setShell({ name: 'scan' })}
       />
     );
-  } else if (shell?.name === 'file' && !isWide) {
+  } else if (shell?.name === 'file' && !isWide && Platform.OS !== 'web') {
     body = (
       <FilePreviewScreen
         threadId={threadId || ''}
@@ -163,6 +187,8 @@ function Root() {
               onOpenThread={selectThread}
               onSettings={() => setShell({ name: 'settings' })}
               onScan={() => setShell({ name: 'scan' })}
+              pendingCreate={pendingCreate}
+              onCreateThread={beginCreateThread}
             />
           </View>
 
@@ -170,12 +196,14 @@ function Root() {
             {waitingThread ? waitingPane : (
               <ThreadScreen
                 threadId={threadId}
+                pendingCreate={pendingCreate}
                 onOpenLeft={() => setLeft((v) => !v)}
                 onOpenRight={() => setRight((v) => !v)}
                 onOpenFile={(path) => setShell({ name: 'file', path })}
                 onOpenThread={selectThread}
                 onScan={() => setShell({ name: 'scan' })}
                 hideSideButtons
+                showHandshake={false}
               />
             )}
           </View>
@@ -189,7 +217,7 @@ function Root() {
           </View>
         </View>
       );
-    } else if (!threadId || waitingThread) {
+      } else if (!threadId || waitingThread) {
       body = (
         <View style={styles.main}>
           <ThreadListScreen
@@ -197,6 +225,8 @@ function Root() {
             onOpenThread={(id) => { selectThread(id); setLeft(false); }}
             onSettings={() => setShell({ name: 'settings' })}
             onScan={() => setShell({ name: 'scan' })}
+            pendingCreate={pendingCreate}
+            onCreateThread={beginCreateThread}
           />
         </View>
       );
@@ -205,6 +235,7 @@ function Root() {
         <View style={styles.main}>
           <ThreadScreen
             threadId={threadId}
+            pendingCreate={pendingCreate}
             onBack={() => setThreadId(undefined)}
             onOpenLeft={() => { setRight(false); setLeft(true); }}
             onOpenRight={() => { setLeft(false); setRight(true); }}
@@ -233,9 +264,9 @@ function Root() {
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.bg }]} edges={['top', 'left', 'right']}>
       <StatusBar style={theme === 'dark' ? 'light' : 'dark'} />
       {body}
-      {isWide && shell?.name === 'file' ? (
-        <View style={styles.previewOverlay}>
-          <Pressable style={styles.dim} onPress={() => setShell(null)} />
+      {(isWide || Platform.OS === 'web') && shell?.name === 'file' ? (
+        <View style={styles.previewOverlay} pointerEvents="box-none">
+          <Pressable style={styles.previewDim} onPress={() => setShell(null)} />
           <View style={[styles.previewCard, { backgroundColor: colors.bg, borderColor: colors.line }]}>
             <FilePreviewScreen
               threadId={threadId || ''}
@@ -279,13 +310,28 @@ const styles = StyleSheet.create({
   desktopRight: { width: 320, borderLeftWidth: 1, overflow: 'hidden' },
   previewOverlay: {
     ...StyleSheet.absoluteFillObject,
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 28,
+    zIndex: 40,
+  },
+  previewDim: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(15, 23, 42, 0.28)',
   },
   previewCard: {
-    width: '58%',
-    maxWidth: 920,
-    borderLeftWidth: 1,
+    width: '86%',
+    maxWidth: 980,
+    height: '82%',
+    maxHeight: 860,
+    borderWidth: 1,
+    borderRadius: 16,
     overflow: 'hidden',
+    zIndex: 41,
+    elevation: 12,
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 28,
+    shadowOffset: { width: 0, height: 12 },
   },
 });

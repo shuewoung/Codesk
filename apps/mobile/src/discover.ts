@@ -155,6 +155,25 @@ export function pageHubUrl(opts?: { hostname?: string; port?: string; protocol?:
   return sameHostHubUrl({ hostname, protocol: opts?.protocol || ctx.protocol });
 }
 
+export function hubUrlForPage(hubUrl: string, pageOrigin?: string): string {
+  const base = normalizeHubUrl(hubUrl);
+  const origin = stripSlash(pageOrigin || '');
+  if (!base) return '';
+  if (!origin) return base;
+  try {
+    const target = new URL(base);
+    const page = new URL(origin);
+    const host = target.hostname.replace(/^\[|\]$/g, '');
+    if (host !== page.hostname.replace(/^\[|\]$/g, '')) return base;
+    if (!isPublicPageHost(host)) return base;
+    const pagePort = page.port || (page.protocol === 'https:' ? '443' : '80');
+    if (target.port === String(HUB_PORT) && pagePort !== String(HUB_PORT)) return origin;
+  } catch {
+    /* keep base */
+  }
+  return base;
+}
+
 export function isColocatedWebShell(env?: LanProbeEnv): boolean {
   const merged = { ...runtimeLanProbeEnv(), ...env };
   if (String(merged.os || '') !== 'web') return false;

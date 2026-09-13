@@ -41,7 +41,24 @@ export function emptyHistory(): ThreadHistory {
 
 const LIVE_HISTORY_WINDOW = 250;
 
-export function mergeHistory(prev: ThreadHistory | undefined, data: unknown): ThreadHistory {
+const LOCK_HOLDERS = new Set(['desktop', 'desktop-stale', 'hub']);
+
+export function isLockHolder(value: unknown): value is NonNullable<ThreadHistory['lockHolder']> {
+  return typeof value === 'string' && LOCK_HOLDERS.has(value);
+}
+
+// Banner switch for the thread header: which lock notice (if any) should render.
+// Unknown/absent holders render no banner; 'desktop-stale' is treated as its own case
+// because the desktop cannot be trusted to take over directly. 'hub' also renders no
+// banner — Hub ownership is the web-side steady state, not something to keep nagging about.
+export type LockBannerKind = 'desktop' | 'desktop-stale' | null;
+
+export function lockBannerKind(holder: unknown): LockBannerKind {
+  if (!isLockHolder(holder)) return null;
+  return holder === 'hub' ? null : holder;
+}
+
+export function mergeHistory(prev: ThreadHistory | undefined, data: unknown, options: { authoritative?: boolean } = {}): ThreadHistory {
   const incoming = data && typeof data === 'object' ? (data as Record<string, unknown>) : {};
   const delta = incoming.delta && typeof incoming.delta === 'object'
     ? (incoming.delta as { newItems?: HistoryItem[]; baseRev?: number })
@@ -53,21 +70,37 @@ export function mergeHistory(prev: ThreadHistory | undefined, data: unknown): Th
     delta?.newItems && prev?.items && prev.rev !== undefined && prev.rev === delta.baseRev,
   );
 
+  // Never advance a revision while retaining content from another revision.
+  const authoritative = options.authoritative === true && incomingFull && Array.isArray(incoming.items);
+  if (!authoritative && prev?.rev !== undefined && typeof incoming.rev === 'number' && incoming.rev < prev.rev) return prev;
   let mergedItems: HistoryItem[];
   let full = prevFull;
-  if (deltaApplies) {
+  let needsReconcile = false;
+  if (authoritative) {
+    mergedItems = nextItems;
+    full = true;
+  } else if (deltaApplies) {
     const combined = prev!.items.concat(delta!.newItems!);
     full = prevFull || incomingFull;
     mergedItems = full ? combined : combined.slice(-LIVE_HISTORY_WINDOW);
+  } else if (prev?.items?.length && nextItems.length && nextItems.length < prev.items.length) {
+    // A bounded snapshot is a suffix, not a replacement for already loaded pages.
+    // Find a verified overlap; item IDs also allow the live tail to change in place.
+    const same = (a: HistoryItem, b: HistoryItem) => a.id && b.id
+      ? a.id === b.id : JSON.stringify(a) === JSON.stringify(b);
+    const offset = prev.items.findIndex(item => same(item, nextItems[0]));
+    const overlap = offset < 0 ? 0 : Math.min(prev.items.length - offset, nextItems.length);
+    const valid = overlap > 0 && nextItems.slice(0, overlap).every((item, i) => same(prev.items[offset + i], item));
+    if (valid) mergedItems = prev.items.slice(0, offset).concat(nextItems);
+    else { mergedItems = prev.items; needsReconcile = true; }
+    full = prevFull;
+  } else if (!nextItems.length && prev?.items?.length && (delta || !incomingFull)) {
+    mergedItems = prev.items;
+    full = prevFull;
+    needsReconcile = typeof incoming.rev === 'number' && incoming.rev !== prev.rev;
   } else if (incomingFull) {
     mergedItems = nextItems;
     full = true;
-  } else if (prev?.items?.length && nextItems.length && nextItems.length < prev.items.length) {
-    mergedItems = prev.items;
-    full = prevFull;
-  } else if (!nextItems.length && prev?.items?.length) {
-    mergedItems = prev.items;
-    full = prevFull;
   } else {
     mergedItems = nextItems;
     full = incomingFull;
@@ -87,7 +120,7 @@ export function mergeHistory(prev: ThreadHistory | undefined, data: unknown): Th
         ? incoming.activeActionText
         : prev?.activeActionText || '',
     cwd: typeof incoming.cwd === 'string' ? incoming.cwd : prev?.cwd || '',
-    lockHolder: incoming.lockHolder === 'desktop' || incoming.lockHolder === 'hub'
+    lockHolder: isLockHolder(incoming.lockHolder)
       ? incoming.lockHolder
       : incoming.lockHolder === null
         ? null
@@ -99,9 +132,12 @@ export function mergeHistory(prev: ThreadHistory | undefined, data: unknown): Th
       incoming.tokenUsage && typeof incoming.tokenUsage === 'object'
         ? (incoming.tokenUsage as ThreadHistory['tokenUsage'])
         : prev?.tokenUsage,
-    rev: typeof incoming.rev === 'number' ? incoming.rev : prev?.rev,
+    needsReconcile,
+    branch: typeof incoming.branch === 'string' ? incoming.branch : prev?.branch,
+    executionLocation: typeof incoming.executionLocation === 'string' ? incoming.executionLocation : prev?.executionLocation,
+    rev: needsReconcile ? prev?.rev : typeof incoming.rev === 'number' ? incoming.rev : prev?.rev,
     totalItems: typeof incoming.totalItems === 'number' ? incoming.totalItems : prev?.totalItems,
-    hasMore: typeof incoming.hasMore === 'boolean' ? incoming.hasMore : prev?.hasMore,
+    hasMore: prevFull && !incomingFull ? prev?.hasMore : typeof incoming.hasMore === 'boolean' ? incoming.hasMore : prev?.hasMore,
     full,
   };
 }
@@ -122,6 +158,22 @@ function itemText(item: HistoryItem): string {
   }
   if (typeof item.text === 'string') return item.text;
   return '';
+}
+
+function itemImages(item: HistoryItem): TimelineNode['images'] {
+  const parts = Array.isArray(item.content) ? item.content : [];
+  const images: NonNullable<TimelineNode['images']> = [];
+  for (const part of parts) {
+    if (!part || typeof part !== 'object') continue;
+    const rec = part as { type?: string; image_url?: string; url?: string; path?: string; name?: string };
+    if (rec.type !== 'input_image' && rec.type !== 'image' && rec.type !== 'localImage') continue;
+    images.push({
+      uri: rec.image_url || rec.url,
+      path: rec.path,
+      name: rec.name,
+    });
+  }
+  return images.length ? images : undefined;
 }
 
 function reasoningItemText(item: HistoryItem): string {
@@ -160,16 +212,7 @@ function cleanVisibleText(raw: string): string {
   let text = key.replace(/\r\n/g, '\n');
   text = text.replace(SKIP_BLOCKS, '');
   text = text.replace(/<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>/gi, '');
-  text = text.replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, '');
   text = text.replace(/\n{3,}/g, '\n\n').trim();
-  if (text && (text.startsWith('{') || text.startsWith('[')) && text.length > 80) {
-    try {
-      JSON.parse(text);
-      text = '';
-    } catch {
-      /* keep */
-    }
-  }
   if (cleanTextCache.size >= CLEAN_TEXT_CACHE_MAX) cleanTextCache.clear();
   cleanTextCache.set(key, text);
   return text;
@@ -248,10 +291,57 @@ function getItemStableId(item: HistoryItem, fallbackType: string, index: number)
   const ts = item?.timestamp || item?.created_at || (item as Record<string, unknown>)?.turn || '';
   const textSample = itemText(item).slice(0, 40);
   const h = Math.abs(hashString(`${fallbackType}_${ts}_${textSample}`));
-  return `${fallbackType}-${h || index}`;
+  return `${fallbackType}-${h}-${index}`;
+}
+
+// A last reply is evidence, not proof that the user's task succeeded.
+export function resultSummary(history?: ThreadHistory): { status: string; reply: string } {
+  if (!history) return { status: '尚无结果', reply: '' };
+  const lastUser = history.items.reduce((last, item, i) => item.role === 'user' ? i : last, -1);
+  const replies = history.items.slice(lastUser + 1).filter(item =>
+    (item.type === 'message' && item.role === 'assistant' && item.channel !== 'analysis' && item.channel !== 'commentary') ||
+    (item.type === 'agent_message' && !item.author && !item.recipient));
+  const reply = replies.length ? cleanVisibleText(itemText(replies[replies.length - 1])).slice(0, 500) : '';
+  const status = history.status === 'working' ? '仍在运行' : history.status === 'waiting_approval' ? '等待审批' : /error|fail/.test(history.status) ? '执行异常' : reply ? '最新答复（请核对结果）' : '尚无本轮末答复';
+  return { status, reply };
+}
+
+export function normalizeTimelineItems(items: HistoryItem[]): HistoryItem[] {
+  const types: Record<string, string> = { Reasoning: 'reasoning', CommandExecution: 'command_execution', AgentMessage: 'agent_message', McpToolCall: 'mcp_tool_call', UserMessage: 'message', FileChange: 'file_change', ContextCompaction: 'context_compaction', ImageView: 'image_view' };
+  const out: HistoryItem[] = [], positions = new Map<string, number>();
+  for (const entry of items) {
+    const wrapped = entry.type === 'item_completed';
+    const raw = (wrapped ? entry.item : entry) as HistoryItem;
+    if (!raw || typeof raw !== 'object') continue;
+    const item: HistoryItem = { ...raw, type: types[raw.type || ''] || raw.type, ...(raw.type === 'UserMessage' ? { role: 'user' } : {}), ...(wrapped ? { completed: true } : {}) };
+    if (raw.type === 'Extension') item.type = raw.kind === 'web.search' ? 'web_search' : raw.kind === 'image_gen.generation' ? 'generated_image' : 'extension';
+    const keys = [item.id, item.call_id, item.callId].filter(Boolean).map(id => `${/_output$/.test(item.type || '') ? 'output' : 'item'}:${id}`);
+    const pos = keys.map(key => positions.get(key)).find(i => i !== undefined);
+    const index = pos ?? out.length;
+    if (pos !== undefined) out[pos] = out[pos].completed && !item.completed ? { ...item, ...out[pos] } : { ...out[pos], ...item };
+    else out.push(item);
+    for (const key of keys) positions.set(key, index);
+  }
+  const outputs = new Map(out.filter(i => /_output$/.test(i.type || '')).map(i => [String(i.call_id || i.callId || i.id || ''), i]));
+  return out.map(i => {
+    const result = !/_output$/.test(i.type || '') && outputs.get(String(i.call_id || i.callId || i.id || ''));
+    if (!result) return i;
+    let payload = result.output ?? result.content;
+    if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { /* keep text */ } }
+    const structured = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+    const failed = result.isError || result.success === false || structured.isError || structured.success === false || structured.error || (typeof structured.exit_code === 'number' && structured.exit_code !== 0) || (typeof structured.exitCode === 'number' && structured.exitCode !== 0);
+    return { ...i, output: result.output ?? result.content, status: result.status ?? (failed ? 'failed' : i.status), error: result.error ?? structured.error ?? (failed ? true : i.error) };
+  });
+}
+
+function boundedOutput(value: unknown): string {
+  if (value == null) return '';
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return text.length > 16000 ? `${text.slice(0, 16000)}\n[输出已截断]` : text;
 }
 
 export function flattenItems(items: HistoryItem[]): TimelineNode[] {
+  items = normalizeTimelineItems(items || []);
   const out: TimelineNode[] = [];
   const skipTypes = new Set([
     'token_count',
@@ -263,7 +353,42 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
   for (const item of items || []) {
     idx++;
     const type = item.type || '';
-    if (skipTypes.has(type)) continue;
+    if (skipTypes.has(type)) {
+      if (/_output$/.test(type) && (item.error || /fail|error|denied/.test(String(item.status || '')))) {
+        const callId = item.call_id || item.callId;
+        if (!callId || !items.some(other => !/_output$/.test(other.type || '') && (other.call_id || other.callId) === callId)) out.push({ id: getItemStableId(item, 'error', idx), kind: 'command', important: true, text: '工具执行异常', output: boundedOutput(item.error || item.output) });
+      }
+      continue;
+    }
+    const status = String(item.status || '');
+    const important = Boolean(item.error || item.isError || item.success === false || (typeof item.exitCode === 'number' && item.exitCode !== 0) || (typeof item.exit_code === 'number' && item.exit_code !== 0)) || /error|fail|approval|denied/i.test(status) || /error|approval/.test(type);
+    const common = { id: getItemStableId(item, type, idx), status, important, turnId: String(item.turn_id || item.turnId || ''), output: boundedOutput(item.output ?? item.aggregated_output ?? item.aggregatedOutput ?? item.result ?? item.error) };
+    if (type === 'generated_image' || type === 'image_view' || type === 'image_generation_call') {
+      const result = typeof item.result === 'string' ? item.result : '';
+      const path = String(item.path || item.image_path || item.imagePath || item.output_path || item.outputPath || (/^(?:\/|[a-z]:[\\/])/i.test(result) ? result : ''));
+      const uri = String(item.url || (/^data:image\//.test(result) ? result : result.length > 100 && /^[A-Za-z0-9+/=\r\n]+$/.test(result) ? `data:image/png;base64,${result}` : ''));
+      const images = [...(path || uri ? [{ path: path || undefined, uri: uri || undefined }] : []), ...(Array.isArray(item.outputPaths) ? item.outputPaths.filter(p => typeof p === 'string').map(p => ({ path: String(p) })) : [])];
+      if (images.length || important) out.push({ ...common, kind: type === 'image_view' ? 'image-view' : 'generated-image', text: type === 'image_view' ? '查看图片' : '生成图片', path, images: images.length ? images : undefined });
+      continue;
+    }
+    if (type === 'web_search' || type === 'web_search_call') {
+      out.push({ ...common, kind: 'search', searchResults: Array.isArray(item.results) ? (item.results as Record<string, unknown>[]).filter(r => typeof r?.url === 'string' && /^https?:\/\//i.test(r.url)).slice(0, 20).map(r => ({ title: String(r.title || r.url), url: String(r.url) })) : undefined, text: String(item.query || (item.action as Record<string, unknown>)?.query || '网页搜索'), output: boundedOutput(item.results || item.action || item.output || item.result) });
+      continue;
+    }
+    if (type === 'context_compaction') { out.push({ ...common, kind: 'compaction', text: itemText(item) || '上下文已压缩' }); continue; }
+    if (type === 'command_execution' || type === 'mcp_tool_call' || important) {
+      out.push({ ...common, kind: 'command', text: String(item.command || item.tool || item.name || itemText(item) || type), command: String(item.command || '') });
+      continue;
+    }
+    if ((type === 'file_change' || type === 'fileChange') && Array.isArray(item.changes)) {
+      for (const [n, change] of (item.changes as Record<string, unknown>[]).entries()) {
+        const patch = String(change.diff || change.patch || '');
+        const path = String(change.path || '');
+        if (!path && !patch) continue;
+        out.push({ ...common, id: `${common.id}-${n}`, kind: 'diff', text: `${typeof change.kind === 'object' && change.kind ? (change.kind as Record<string, unknown>).type || '修改' : change.kind || change.type || '修改'} ${path}`, patch, ...patchStats(patch), ...(path ? { path } : {}) });
+      }
+      continue;
+    }
     if (type === 'reasoning' || type === 'agent_reasoning') {
       const text = reasoningItemText(item);
       if (!text) continue;
@@ -276,25 +401,38 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
       const role = item.role || 'assistant';
       if (role === 'developer') continue;
       const text = cleanVisibleText(itemText(item));
-      if (!text) continue;
+      const images = role === 'user' ? itemImages(item) : undefined;
+      const attachments = role === 'user' && Array.isArray(item.content)
+        ? item.content.filter(part => part && typeof part === 'object' && ['mention', 'skill'].includes(part.type) && typeof part.path === 'string')
+          .map(part => ({ name: String(part.name || part.path), path: String(part.path) })) : undefined;
+      if (!text && !images?.length && !attachments?.length) continue;
       if (role === 'user') {
         const trimmed = text.trim();
-        const isSubagentCallback = trimmed.includes('"agent_path":') || trimmed.includes('"agent_path"') || (trimmed.startsWith('{') && (trimmed.includes('"completed"') || trimmed.includes('"status"') || trimmed.includes('"cell_id"')));
-        if (isSubagentCallback) {
-          let completedText = '';
-          try {
-            const parsed = JSON.parse(trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')) as Record<string, unknown>;
-            const statusObj = parsed && typeof parsed.status === 'object' ? (parsed.status as Record<string, unknown>) : null;
-            completedText = String(statusObj?.completed || parsed?.completed || parsed?.output || '');
-          } catch {}
-          if (completedText && typeof completedText === 'string') {
+        let callback: Record<string, unknown> | null = null;
+        try {
+          const parsed = JSON.parse(trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
+          // Generic status/completed fields are normal user JSON, not callback evidence.
+          if (parsed && !Array.isArray(parsed) && typeof parsed.agent_path === 'string'
+            && parsed.agent_path && ('status' in parsed || 'completed' in parsed || 'output' in parsed)) callback = parsed;
+        } catch { /* ordinary text */ }
+        if (callback) {
+          const statusObj = callback.status && typeof callback.status === 'object' ? callback.status as Record<string, unknown> : null;
+          const completedText = statusObj?.completed || callback.completed || callback.output;
+          if (typeof completedText === 'string' && completedText) {
             const last = out[out.length - 1];
             if (last && last.kind === 'assistant') last.text = `${last.text}\n\n${completedText}`;
             else out.push({ id: getItemStableId(item, 'assistant', idx), kind: 'assistant', text: completedText });
           }
           continue;
         }
-        out.push({ id: getItemStableId(item, 'user', idx), kind: 'user', text });
+        out.push({
+          id: getItemStableId(item, 'user', idx),
+          kind: 'user',
+          deliveryStatus: item.deliveryStatus as TimelineNode['deliveryStatus'],
+          attachments: attachments?.length ? attachments : undefined,
+          text: text || (images?.length ? '[图片]' : ''),
+          images,
+        });
       } else {
         const last = out[out.length - 1];
         if (last && last.kind === 'assistant') last.text = `${last.text}\n\n${text}`;
@@ -303,6 +441,12 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
       continue;
     }
     if (type === 'agent_message') {
+      const metadata = item.inter_agent_communication_metadata as Record<string, unknown> | undefined;
+      if (metadata) {
+        const threadId = String(metadata.sender_thread_id || metadata.agent_thread_id || metadata.thread_id || '');
+        out.push({ ...common, kind: 'agent', threadId: threadId || undefined, text: String(metadata.title || metadata.agent_name || itemText(item) || '子智能体'), status: String(metadata.status || 'unknown'), model: typeof metadata.model === 'string' ? metadata.model : undefined });
+        continue;
+      }
       const author = item.author ? String(item.author).trim() : '';
       const recipient = item.recipient ? String(item.recipient).trim() : '';
       // 仅当明确存在子智能体身份时才作为子智能体动态节点
@@ -330,7 +474,7 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
       continue;
     }
     const args = parseArgs(item);
-    const toolName = String(item.name || item.tool || '');
+    const toolName = String(item.name || item.tool || '').replace(/^functions\./, '');
     const rawCmd = typeof args?.cmd === 'string'
       ? args.cmd
       : typeof args?.command === 'string'
@@ -368,7 +512,15 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
       type === 'apply_patch' ||
       ['apply_patch', 'apply_delta', 'write_file', 'edit'].includes(toolName);
     if (isDiff) {
-      const patch = String(item.patch || args?.patch || args?.diff || args?.delta || '');
+      const patch = String(item.patch || args?.patch || args?.diff || args?.delta || (toolName === 'apply_patch' && typeof item.input === 'string' ? item.input : '') || '');
+      const blocks = patch.split(/(?=^\*\*\* (?:Add|Update|Delete|Rename) File:)/m).filter(block => /^\*\*\* (?:Add|Update|Delete|Rename) File:/.test(block));
+      if (blocks.length > 1) {
+        for (const [n, block] of blocks.entries()) {
+          const stats = patchStats(block);
+          out.push({ ...common, id: `${common.id}-${n}`, kind: 'diff', text: stats.path, patch: block, ...stats });
+        }
+        continue;
+      }
       const stats = patchStats(patch);
       const path = String(item.path || args?.path || args?.file || stats.path || '');
       const fileName = path.split(/[\\/]/).filter(Boolean).pop() || '文件';
@@ -395,6 +547,10 @@ export function flattenItems(items: HistoryItem[]): TimelineNode[] {
         id: getItemStableId(item, 'cmd', idx),
         kind: 'command',
         text: label,
+        command: actual || rawCmd,
+        output: common.output,
+        status,
+        important,
       });
     }
   }
@@ -459,7 +615,7 @@ export type FeedNode = TimelineNode | CommandGroup | AgentGroup;
 export function groupCommandNodes(nodes: TimelineNode[]): FeedNode[] {
   const out: FeedNode[] = [];
   for (const n of nodes) {
-    if (n.kind === 'command') {
+    if (n.kind === 'command' && !n.important) {
       const last = out[out.length - 1];
       if (last && last.kind === 'cmd-group') {
         last.commands.push(n);

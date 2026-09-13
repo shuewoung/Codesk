@@ -1,7 +1,9 @@
 import * as Clipboard from 'expo-clipboard';
-import React, { useState } from 'react';
-import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { ErrorBanner, GhostButton, PrimaryButton } from '../components/ui';
+import React, { useRef, useState } from 'react';
+import { Alert, Linking, Platform,  ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { AccessiblePressable as Pressable, ErrorBanner, GhostButton, PrimaryButton } from '../components/ui';
+import { HandshakePanel } from '../components/HandshakePanel';
+import { buildHandshake } from '../handshake';
 import { useSession } from '../session';
 import { radius, space } from '../theme';
 import { useTheme } from '../theme-context';
@@ -16,6 +18,31 @@ export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan:
   const [relayUrl, setRelayUrl] = useState(session.relayUrl);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
+  const logoutLock = useRef(false);
+  const [logoutError, setLogoutError] = useState('');
+  const [diagnosticMessage, setDiagnosticMessage] = useState('');
+  const diagnosticHandshake = buildHandshake({ mode: session.mode, phase: session.handshake.phase });
+  const diagnosticReport = JSON.stringify({ version: CURRENT_VERSION, platform: Platform.OS,
+    ...session.diagnostics, phase: diagnosticHandshake.phase,
+    steps: diagnosticHandshake.steps.map(({ key, state }) => ({ key, state })),
+  }, null, 2);
+  async function logout(localOnly = false) {
+    if (logoutLock.current) return;
+    logoutLock.current = true;
+    setBusy(true);
+    setLogoutError('');
+    try { await session.logout({ localOnly }); }
+    catch (error) { setLogoutError(error instanceof Error ? error.message : '退出失败，已保留本机登录，请重试'); }
+    finally { logoutLock.current = false; setBusy(false); }
+  }
+  function confirmLogout(localOnly = false) {
+    const title = localOnly ? '仅在本机退出？' : '退出并撤销远程登录？';
+    const detail = localOnly ? '只清除本机凭据，远程授权可能仍有效。请稍后在电脑主机台撤销设备。' : '远程确认成功后才清除本机凭据；失败会保留登录以便重试。';
+    const run = () => { void logout(localOnly); };
+    if (Platform.OS === 'web') { if (typeof window !== 'undefined' && window.confirm(`${title}
+${detail}`)) run(); }
+    else Alert.alert(title, detail, [{ text: '取消', style: 'cancel' }, { text: '确认退出', style: 'destructive', onPress: run }]);
+  }
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateMsg, setUpdateMsg] = useState('');
 
@@ -77,12 +104,14 @@ export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan:
       <View style={styles.row}>
         <Pressable
           style={[styles.chip, { borderColor: colors.line, backgroundColor: theme === 'light' ? colors.card : 'transparent' }]}
+          accessibilityState={{ selected: theme === 'light' }}
           onPress={() => setTheme('light')}
         >
           <Text style={{ color: colors.text }}>浅色</Text>
         </Pressable>
         <Pressable
           style={[styles.chip, { borderColor: colors.line, backgroundColor: theme === 'dark' ? colors.card : 'transparent' }]}
+          accessibilityState={{ selected: theme === 'dark' }}
           onPress={() => setTheme('dark')}
         >
           <Text style={{ color: colors.text }}>深色</Text>
@@ -92,12 +121,14 @@ export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan:
       <View style={styles.row}>
         <Pressable
           style={[styles.chip, { borderColor: colors.line, backgroundColor: listDensity === 'compact' ? colors.card : 'transparent' }]}
+          accessibilityState={{ selected: listDensity === 'compact' }}
           onPress={() => setListDensity('compact')}
         >
           <Text style={{ color: colors.text }}>紧凑</Text>
         </Pressable>
         <Pressable
           style={[styles.chip, { borderColor: colors.line, backgroundColor: listDensity === 'comfortable' ? colors.card : 'transparent' }]}
+          accessibilityState={{ selected: listDensity === 'comfortable' }}
           onPress={() => setListDensity('comfortable')}
         >
           <Text style={{ color: colors.text }}>宽松</Text>
@@ -107,19 +138,22 @@ export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan:
       <View style={styles.row}>
         <Pressable
           style={[styles.chip, { borderColor: colors.line, backgroundColor: showProcess ? colors.card : 'transparent' }]}
+          accessibilityState={{ selected: showProcess }}
           onPress={() => setShowProcess(true)}
         >
           <Text style={{ color: colors.text }}>显示过程</Text>
         </Pressable>
         <Pressable
           style={[styles.chip, { borderColor: colors.line, backgroundColor: !showProcess ? colors.card : 'transparent' }]}
+          accessibilityState={{ selected: !showProcess }}
           onPress={() => setShowProcess(false)}
         >
           <Text style={{ color: colors.text }}>隐藏过程</Text>
         </Pressable>
       </View>
       <Text style={{ color: colors.muted, fontSize: 12 }}>关掉后不显示思考、命令和子智能体过程，只留对话和改文件。</Text>
-      <Text style={[styles.label, { color: colors.muted }]}>访问权限</Text>
+      <Text style={[styles.label, { color: colors.muted }]}>访问权限 · Hub 全局设置</Text>
+      <Text style={{ color: colors.muted, fontSize: 12 }}>服务端回执仅确认已保存 Hub 全局配置；Hub 新轮次按支持字段提交，桌面接续 / 当前轮次由执行端决定。速度配置保存不代表 serviceTier 已生效。离线不可变更。</Text>
       <View style={styles.row}>
         {(Object.keys(ACCESS_MODES) as (keyof typeof ACCESS_MODES)[]).map((id) => (
           <Pressable
@@ -132,6 +166,8 @@ export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan:
                 backgroundColor: session.config.accessMode === id ? colors.card : 'transparent',
               },
             ]}
+            disabled={session.conn !== 'connected'}
+            accessibilityState={{ selected: session.config.accessMode === id, disabled: session.conn !== 'connected' }}
             onPress={() => session.updateConfig('permission', id)}
           >
             <Text style={{ color: colors.text }}>{ACCESS_MODES[id].icon} {ACCESS_MODES[id].label}</Text>
@@ -147,9 +183,14 @@ export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan:
           ? (session.mode === 'lan' ? '直连' : '中继')
           : session.connText}
       </Text>
-      {session.mode === 'lan' && session.lanUrl ? (
-        <Text selectable style={{ color: colors.muted, fontSize: 13 }}>{session.lanUrl}</Text>
-      ) : null}
+      <Text style={[styles.label, { color: colors.muted }]}>连接诊断（已脱敏）</Text>
+      <Text selectable style={{ color: colors.muted }}>{session.diagnostics.endpoint || '尚未连接'}</Text>
+      <HandshakePanel handshake={diagnosticHandshake} onRetry={session.reconnect} retryLabel="重新连接" />
+      <Text style={{ color: colors.muted }}>待响应请求：{session.diagnostics.pendingRequests}</Text>
+      <GhostButton label="复制脱敏诊断报告" onPress={() => {
+        void Clipboard.setStringAsync(diagnosticReport).then(() => setDiagnosticMessage('诊断报告已复制'), () => setDiagnosticMessage('复制失败，请重试'));
+      }} />
+      <Text accessibilityLiveRegion="polite" style={{ color: colors.muted }}>{diagnosticMessage}</Text>
       <Text style={[styles.label, { color: colors.muted }]}>中继地址</Text>
       <TextInput
         value={relayUrl}
@@ -186,15 +227,12 @@ export function SettingsScreen({ onBack, onScan }: { onBack: () => void; onScan:
       />
       <GhostButton label="官网 codesk.icu" onPress={() => { void Linking.openURL('https://codesk.icu'); }} />
       <GhostButton label="GitHub" onPress={() => { void Linking.openURL('https://github.com/shuewoung/codesk'); }} />
-      <PrimaryButton
-        label="退出并吊销此设备"
-        danger
-        busy={busy}
-        onPress={() => {
-          setBusy(true);
-          void session.logout().finally(() => setBusy(false));
-        }}
-      />
+      <ErrorBanner text={logoutError} />
+      <PrimaryButton label={logoutError ? '重试退出并撤销授权' : '退出并撤销远程登录'} danger busy={busy} onPress={() => confirmLogout()} />
+      {logoutError ? <>
+        <Text style={{ color: colors.muted }}>远程退出未确认，已保留登录。仅本地退出不会撤销远程授权。</Text>
+        <GhostButton label="仅在本机退出" disabled={busy} onPress={() => confirmLogout(true)} />
+      </> : null}
     </ScrollView>
   );
 }

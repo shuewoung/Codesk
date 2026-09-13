@@ -50,7 +50,9 @@ function Start-Hub {
   if (-not $env:ONEDESK_RELAY_URL -and -not $env:CODESK_RELAY_URL) {
     $env:ONEDESK_RELAY_URL = "https://hub.codesk.icu:8787"
   }
-  Start-Process -FilePath $node -ArgumentList "server/index.js" -WorkingDirectory $hubDir -WindowStyle Hidden
+  $logDir = Join-Path $hubDir "logs"
+  New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+  Start-Process -FilePath $node -ArgumentList "server/index.js" -WorkingDirectory $hubDir -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir "hub.out") -RedirectStandardError (Join-Path $logDir "hub.err")
   for ($i = 0; $i -lt 20; $i++) {
     Start-Sleep -Milliseconds 300
     if (Test-HubUp) { return }

@@ -11,15 +11,17 @@ export function ApprovalBar({
 }: {
   approval: Approval;
   onDecide: (decision: Decision) => void;
-  lockHolder?: 'desktop' | 'hub' | null;
+  lockHolder?: 'desktop' | 'desktop-stale' | 'hub' | null;
 }) {
   const { colors } = useTheme();
   const detail = decodeApprovalCommand(approval.command || '') || approval.reason || '检测到需要您确认的审批请求。';
   const lockNote = lockHolder === 'desktop'
-    ? '点完后交给电脑上的 Codex 继续。若桌面还弹窗，请在电脑上再确认一次。'
-    : lockHolder === 'hub'
-      ? 'Hub 会代批，不必开桌面。'
-      : '桌面开着时由电脑继续；没开桌面则 Hub 代批。';
+    ? '请求由桌面执行端处理；提交后等待确认，不代表已批准。'
+    : lockHolder === 'desktop-stale'
+      ? '桌面持锁疑似过期；审批不会自动解除写锁或保证接管，请等待执行端确认。'
+      : lockHolder === 'hub'
+        ? '审批将由 Hub 处理。'
+        : '执行位置尚未确认；请等待审批结果，不会仅因点击而视为已解决。';
   return (
     <View style={[styles.wrap, { backgroundColor: colors.bg, borderColor: '#f59e0b' }]}>
       <View style={styles.headerRow}>

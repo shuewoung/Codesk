@@ -1,24 +1,21 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $hubSrc = Join-Path $root "apps\web-hub"
 $mobileSrc = Join-Path $root "apps\mobile"
 $webSrc = Join-Path $mobileSrc "dist-web"
-$legacyWeb = Join-Path $root "apps\web"
-if (-not (Test-Path -LiteralPath (Join-Path $mobileSrc "node_modules"))) {
-  Push-Location $mobileSrc
-  try { npm install } finally { Pop-Location }
-}
 Push-Location $mobileSrc
-try { node scripts/export-web.mjs } finally { Pop-Location }
+try {
+  npm ci
+  if ($LASTEXITCODE -ne 0) { throw "安装 Expo 依赖失败" }
+  node scripts/export-web.mjs
+  if ($LASTEXITCODE -ne 0) { throw "Expo Web 导出失败" }
+} finally { Pop-Location }
+# 旧 PWA 已归档（archive/web、archive/web-hub-public），Expo Web 导出是唯一前端，失败即终止
 if (-not (Test-Path -LiteralPath (Join-Path $webSrc "index.html"))) {
-  Write-Host "Expo Web 导出失败，回退旧 PWA"
-  $webSrc = $legacyWeb
-}
-if (-not (Test-Path -LiteralPath (Join-Path $webSrc "index.html"))) {
-  $webSrc = Join-Path $hubSrc "public"
+  throw "Expo Web 导出失败（apps/mobile/dist-web 缺少 index.html），请检查 export-web.mjs 输出"
 }
 $dist = Join-Path $root "dist"
-$work = "C:\Users\zhang\AppData\Local\Temp\opencode\codesk-pack"
+$work = Join-Path ([IO.Path]::GetTempPath()) ("codesk-pack-" + [Guid]::NewGuid().ToString('N'))
 $stage = Join-Path $work "payload"
 $csc = Join-Path $env:SystemRoot "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 $nodeSrc = (Get-Command node -ErrorAction SilentlyContinue).Source
@@ -91,12 +88,8 @@ function ConvertTo-BmpIco {
 if (-not (Test-Path -LiteralPath $csc)) { throw "找不到 csc.exe" }
 if (-not $nodeSrc -or -not (Test-Path -LiteralPath $nodeSrc)) { throw "找不到本机 node.exe，打包需要先有 Node" }
 
-if (-not (Test-Path -LiteralPath (Join-Path $hubSrc "node_modules"))) {
-  Push-Location $hubSrc
-  try { npm install --omit=dev } finally { Pop-Location }
-}
-
-if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
+# 在 staging 中按 lockfile 安装生产依赖，不复用开发目录的陈旧 node_modules。
+try {
 New-Item -ItemType Directory -Path (Join-Path $stage "hub") | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $stage "node") | Out-Null
 if (-not (Test-Path -LiteralPath $dist)) { New-Item -ItemType Directory -Path $dist | Out-Null }
@@ -104,8 +97,12 @@ if (-not (Test-Path -LiteralPath $dist)) { New-Item -ItemType Directory -Path $d
 Copy-Item -LiteralPath (Join-Path $hubSrc "package.json") -Destination (Join-Path $stage "hub\package.json")
 Copy-Item -LiteralPath (Join-Path $hubSrc "server") -Destination (Join-Path $stage "hub\server") -Recurse
 Copy-Item -LiteralPath $webSrc -Destination (Join-Path $stage "hub\public") -Recurse
-robocopy (Join-Path $hubSrc "node_modules") (Join-Path $stage "hub\node_modules") /E /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
-if ($LASTEXITCODE -ge 8) { throw "复制 node_modules 失败" }
+Copy-Item -LiteralPath (Join-Path $hubSrc "package-lock.json") -Destination (Join-Path $stage "hub\package-lock.json")
+Push-Location (Join-Path $stage "hub")
+try {
+  npm ci --omit=dev
+  if ($LASTEXITCODE -ne 0) { throw "安装 Hub 生产依赖失败" }
+} finally { Pop-Location }
 Copy-Item -LiteralPath $nodeSrc -Destination (Join-Path $stage "node\node.exe")
 
 $hubExe = Join-Path $stage "CodeskHub.exe"
@@ -123,8 +120,10 @@ $installCmd = @'
 @echo off
 set DEST=%LOCALAPPDATA%\Programs\Codesk
 if not exist "%DEST%" mkdir "%DEST%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath '%~dp0payload.zip' -DestinationPath '%DEST%' -Force"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$w=New-Object -ComObject WScript.Shell; $exe=Join-Path $env:LOCALAPPDATA 'Programs\Codesk\CodeskHub.exe'; $desk=[Environment]::GetFolderPath('Desktop'); $sm=Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'; $s=$w.CreateShortcut((Join-Path $desk 'Codesk Hub.lnk')); $s.TargetPath=$exe; $s.WorkingDirectory=(Split-Path $exe); $s.Save(); $s2=$w.CreateShortcut((Join-Path $sm 'Codesk Hub.lnk')); $s2.TargetPath=$exe; $s2.WorkingDirectory=(Split-Path $exe); $s2.Save()"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath '%~dp0payload.zip' -DestinationPath '%DEST%' -Force"
+if errorlevel 1 exit /b 1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $w=New-Object -ComObject WScript.Shell; $exe=Join-Path $env:LOCALAPPDATA 'Programs\Codesk\CodeskHub.exe'; $desk=[Environment]::GetFolderPath('Desktop'); $sm=Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'; $s=$w.CreateShortcut((Join-Path $desk 'Codesk Hub.lnk')); $s.TargetPath=$exe; $s.WorkingDirectory=(Split-Path $exe); $s.Save(); $s2=$w.CreateShortcut((Join-Path $sm 'Codesk Hub.lnk')); $s2.TargetPath=$exe; $s2.WorkingDirectory=(Split-Path $exe); $s2.Save()"
+if errorlevel 1 exit /b 1
 start "" "%DEST%\CodeskHub.exe"
 '@
 Set-Content -LiteralPath (Join-Path $work "install.cmd") -Value $installCmd -Encoding ASCII
@@ -180,3 +179,6 @@ Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $portableZip -For
 Copy-Item -LiteralPath $portableZip -Destination (Join-Path $dist "CodeskHub-portable.zip") -Force
 
 Get-Item (Join-Path $dist "CodeskSetup.exe"), $portableZip | ForEach-Object { "$($_.FullName) $($_.Length)" }
+} finally {
+  if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
+}

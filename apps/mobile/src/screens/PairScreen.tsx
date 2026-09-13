@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { ErrorBanner, GhostButton, PrimaryButton } from '../components/ui';
 import { canLanProbe, discoverHub, isLoopbackHost, isRelayPageHost, pageContext, pageHubUrl } from '../discover';
@@ -18,6 +18,7 @@ export function PairScreen({ onScan }: { onScan: () => void }) {
   const [outCode, setOutCode] = useState('');
   const [busy, setBusy] = useState<'home' | 'out' | ''>('');
   const [localError, setLocalError] = useState('');
+  const submitting = useRef(false);
 
   useEffect(() => {
     if (colocatedWeb) {
@@ -48,6 +49,7 @@ export function PairScreen({ onScan }: { onScan: () => void }) {
   }
 
   async function submitHome() {
+    if (submitting.current) return;
     setLocalError('');
     session.clearError();
     const code = homeCode.trim();
@@ -60,17 +62,20 @@ export function PairScreen({ onScan }: { onScan: () => void }) {
       setLocalError(colocatedWeb ? '无法连接' : '请填写电脑地址');
       return;
     }
+    submitting.current = true;
     setBusy('home');
     try {
       await session.loginLan(url, code);
     } catch (err) {
       fail(err, '家里连接失败');
     } finally {
+      submitting.current = false;
       setBusy('');
     }
   }
 
   async function submitOut() {
+    if (submitting.current) return;
     setLocalError('');
     session.clearError();
     const code = outCode.trim();
@@ -78,12 +83,14 @@ export function PairScreen({ onScan }: { onScan: () => void }) {
       setLocalError('请输入主机台右边的出门码，或扫右边的二维码。');
       return;
     }
+    submitting.current = true;
     setBusy('out');
     try {
       await session.pair(code, session.relayUrl);
     } catch (err) {
       fail(err, '出门连接失败');
     } finally {
+      submitting.current = false;
       setBusy('');
     }
   }
@@ -101,12 +108,17 @@ export function PairScreen({ onScan }: { onScan: () => void }) {
         )}
         <ErrorBanner text={localError || session.error} onClose={() => { setLocalError(''); session.clearError(); }} />
 
-        {loopbackWeb ? (
-          <Text style={[styles.cardHint, { color: colors.muted }]}>无法连接</Text>
-        ) : colocatedWeb ? (
+        {colocatedWeb ? (
           <View style={[styles.card, card]}>
             <Text style={[styles.cardTitle, { color: colors.text }]}>家里码</Text>
+            <Text style={[styles.cardHint, { color: colors.muted }]}>
+              {loopbackWeb
+                ? '本机打开时会自动连 Hub。若一直连不上，确认电脑上 Hub :18990 已运行，再输入主机台左边的 4 位家里码。'
+                : '用主机台左边的 4 位家里码。'}
+            </Text>
             <TextInput
+              accessibilityLabel="家里码"
+              editable={!busy}
               value={homeCode}
               onChangeText={(v) => setHomeCode(v.toUpperCase())}
               autoCapitalize="characters"
@@ -125,6 +137,8 @@ export function PairScreen({ onScan }: { onScan: () => void }) {
             <Text style={[styles.cardTitle, { color: colors.text }]}>家里 WiFi</Text>
             <Text style={[styles.cardHint, { color: colors.muted }]}>用主机台左边的 4 位家里码。</Text>
             <TextInput
+              accessibilityLabel="家里码"
+              editable={!busy}
               value={homeCode}
               onChangeText={(v) => setHomeCode(v.toUpperCase())}
               autoCapitalize="characters"
@@ -137,6 +151,8 @@ export function PairScreen({ onScan }: { onScan: () => void }) {
             />
             {colocatedWeb ? null : (
               <TextInput
+                accessibilityLabel="电脑 Hub 地址"
+                editable={!busy}
                 value={lanUrl}
                 onChangeText={setLanUrl}
                 autoCapitalize="none"
@@ -153,11 +169,13 @@ export function PairScreen({ onScan }: { onScan: () => void }) {
           </View>
         )}
 
-        {colocatedWeb ? null : (
+        {colocatedWeb && !loopbackWeb ? null : colocatedWeb ? (
           <View style={[styles.card, card]}>
             <Text style={[styles.cardTitle, { color: colors.text }]}>出门</Text>
-            <Text style={[styles.cardHint, { color: colors.muted }]}>用主机台右边的一次性出门码。中继没连上就出不了这个码。</Text>
+            <Text style={[styles.cardHint, { color: colors.muted }]}>Hub 没开时，也可用主机台右边的出门码。</Text>
             <TextInput
+              accessibilityLabel="出门码"
+              editable={!busy}
               value={outCode}
               onChangeText={(v) => setOutCode(v.toUpperCase())}
               autoCapitalize="characters"
@@ -169,7 +187,26 @@ export function PairScreen({ onScan }: { onScan: () => void }) {
               onSubmitEditing={() => { void submitOut(); }}
             />
             <PrimaryButton label="连接出门" busy={busy === 'out'} disabled={!!busy} onPress={() => { void submitOut(); }} />
-            {Platform.OS === 'web' ? null : <GhostButton label="扫描出门二维码" onPress={onScan} />}
+          </View>
+        ) : (
+          <View style={[styles.card, card]}>
+            <Text style={[styles.cardTitle, { color: colors.text }]}>出门</Text>
+            <Text style={[styles.cardHint, { color: colors.muted }]}>用主机台右边的出门码。中继没连上就出不了这个码。</Text>
+            <TextInput
+              accessibilityLabel="出门码"
+              editable={!busy}
+              value={outCode}
+              onChangeText={(v) => setOutCode(v.toUpperCase())}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              placeholder="出门码"
+              placeholderTextColor={colors.muted}
+              style={[styles.input, { backgroundColor: colors.shell, color: colors.text, borderColor: colors.line }]}
+              returnKeyType="go"
+              onSubmitEditing={() => { void submitOut(); }}
+            />
+            <PrimaryButton label="连接出门" busy={busy === 'out'} disabled={!!busy} onPress={() => { void submitOut(); }} />
+            {Platform.OS === 'web' ? null : <GhostButton label="扫描出门二维码" disabled={!!busy} onPress={onScan} />}
           </View>
         )}
       </ScrollView>

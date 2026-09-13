@@ -88,7 +88,6 @@ function updateMobileViewport() {
   } else {
     document.body.classList.remove('kb-open');
   }
-  window.scrollTo(0, 0);
 }
 
 if (window.visualViewport) {
@@ -101,12 +100,7 @@ document.addEventListener('focusin', (e) => {
   if (e.target && e.target.id === 'msg-input') {
     requestAnimationFrame(() => {
       updateMobileViewport();
-      window.scrollTo(0, 0);
     });
-    setTimeout(() => {
-      updateMobileViewport();
-      window.scrollTo(0, 0);
-    }, 250);
   }
 });
 
@@ -998,6 +992,7 @@ function handleWSMessage(msg) {
   } else if (msg.type === 'config_data') {
     applyConfigData(msg.data);
   } else if (msg.type === 'thread_created') {
+    endCreatingThread();
     selectThread(msg.threadId, msg.title || '新聊天');
     if (pendingFirstSend) {
       const pending = pendingFirstSend;
@@ -1081,6 +1076,7 @@ function handleWSMessage(msg) {
   } else if (msg.type === 'search_results') {
     /* PWA 仍走 REST 搜索 */
   } else if (msg.type === 'action_feedback') {
+    if (msg.action === 'create_thread') endCreatingThread();
     const gone = msg.status === 'error' && /审批|timeout|超时|没有找到|未命中/i.test(String(msg.message || '') + String(msg.code || ''));
     if (gone) dismissApprovalUI(msg.threadId || currentThreadId, msg.requestId, msg.ids);
     if (msg.status === 'error') {
@@ -1382,7 +1378,8 @@ function groupThreadsByProject(rawThreads) {
 function syncNewChatCwd(projects) {
   const btn = document.querySelector('.btn-new-task');
   const selected = projects.find(p => p.name === selectedProjectKey) || projects[0];
-  if (btn && selected && selected.cwd) btn.dataset.cwd = selected.cwd;
+  // cwd 为空时也要写入，避免残留上一个项目的 cwd 导致新会话建错目录
+  if (btn && selected) btn.dataset.cwd = selected.cwd || '';
 }
 
 function persistExpandedProjects() {
@@ -1438,12 +1435,18 @@ function renderProjectFolder(proj, threads) {
   const expanded = !!sidebarFilter.trim() || expandedProjects.has(proj.name);
   const threadsHtml = (threads || []).map((t) => renderThreadItem(t, proj.name)).join('');
 
+  // 项目元数据可能缺 cwd（如置顶项目无根目录），用组内任一会话的 cwd 兜底，
+  // 否则文件夹旁的 "+" 会以空 cwd 新建、落到默认目录，看起来像"点了没反应"
+  const folderCwd = proj.cwd || (threads || []).map((t) => t && t.cwd).find(Boolean) || '';
+
   const workingCount = (threads || []).filter((t) => t && (t.isActive || t.status === 'working' || t.working)).length;
   const waitingCount = (threads || []).filter((t) => t && (t.needsApproval || t.status === 'waiting_approval')).length;
   const justFinishedCount = (threads || []).filter((t) => t && !t.isActive && t.status !== 'working' && !t.working && !t.needsApproval && t.status !== 'waiting_approval' && (Date.now() - (t.mtimeMs || 0) < 60000)).length;
 
   let folderBadge = '';
-  if (workingCount > 0) {
+  if (proj.name === creatingProjectKey) {
+    folderBadge = '<span class="folder-status-badge badge-creating" title="正在此项目新建对话"><span class="status-pulse-dot dot-blue"></span> 新建中</span>';
+  } else if (workingCount > 0) {
     folderBadge = `<span class="folder-status-badge badge-working" title="${workingCount} 个任务运行中"><span class="status-pulse-dot"></span> ${workingCount}</span>`;
   } else if (waitingCount > 0) {
     folderBadge = `<span class="folder-status-badge badge-waiting" title="${waitingCount} 个任务等待批准">✋ ${waitingCount}</span>`;
@@ -1452,8 +1455,8 @@ function renderProjectFolder(proj, threads) {
   }
 
   return `
-      <div class="project-folder ${expanded ? 'expanded' : ''}" data-project="${escapeHtml(proj.name)}">
-        <div class="project-folder-header" data-kind="project" data-project="${escapeHtml(proj.name)}" data-project-id="${escapeHtml(proj.id || '')}" data-pinned="${proj.isPinned ? '1' : '0'}" data-cwd="${escapeHtml(proj.cwd || '')}">
+      <div class="project-folder ${expanded ? 'expanded' : ''} ${proj.name === creatingProjectKey ? 'creating' : ''}" data-project="${escapeHtml(proj.name)}">
+        <div class="project-folder-header" data-kind="project" data-project="${escapeHtml(proj.name)}" data-project-id="${escapeHtml(proj.id || '')}" data-pinned="${proj.isPinned ? '1' : '0'}" data-cwd="${escapeHtml(folderCwd)}">
           <span class="project-icon">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7h6l2 2h10v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>
           </span>
@@ -1461,7 +1464,7 @@ function renderProjectFolder(proj, threads) {
           ${proj.isPinned ? '<span class="pin-mark" title="取消置顶">📌</span>' : ''}
           ${folderBadge}
           <span class="project-count">${(threads || []).length}</span>
-          <button type="button" class="btn-project-new" data-cwd="${escapeHtml(proj.cwd || '')}" title="在此项目新建对话">+</button>
+          <button type="button" class="btn-project-new" data-cwd="${escapeHtml(folderCwd)}" title="在此项目新建对话">+</button>
         </div>
         <div class="project-items ${expanded ? '' : 'hidden'}">
           ${threadsHtml || '<div class="sidebar-empty">暂无对话</div>'}
@@ -1552,8 +1555,10 @@ function renderSidebarLists() {
     return;
   }
 
-  const activeProject = visibleProjects.find((p) => p.threads.some((t) => t.id === currentThreadId))
-    || projects.find((p) => p.name === selectedProjectKey)
+  // 用户点击文件夹选中的项目优先；仅当选择失效（项目已不存在）时才跟随当前会话所属项目，
+  // 否则轮询刷新会把选中项目（以及顶部新建按钮的 cwd）悄悄改回当前会话的项目
+  const activeProject = projects.find((p) => p.name === selectedProjectKey)
+    || visibleProjects.find((p) => p.threads.some((t) => t.id === currentThreadId))
     || pinnedItems.map((item) => item.project).find(Boolean)
     || visibleProjects[0]
     || projects[0];
@@ -1698,7 +1703,17 @@ threadListEl.addEventListener('click', (e) => {
   if (newBtn) {
     e.preventDefault();
     e.stopPropagation();
-    createNewChat(newBtn.getAttribute('data-cwd') || '');
+    const cwd = newBtn.getAttribute('data-cwd') || '';
+    // 在此项目新建 = 同时把选中项目切过去，后续轮询刷新与顶部"新建"按钮都指向它
+    const folder = newBtn.closest('.project-folder');
+    const projName = folder ? folder.getAttribute('data-project') || '' : '';
+    if (projName) {
+      selectedProjectKey = projName;
+      localStorage.setItem('activeProjectKey', projName);
+    }
+    const taskBtn = document.querySelector('.btn-new-task');
+    if (taskBtn) taskBtn.dataset.cwd = cwd;
+    createNewChat(cwd);
     return;
   }
   const bucketToggle = e.target.closest('.bucket-toggle');
@@ -1784,19 +1799,33 @@ if (sidebarFilterEl) {
   });
 }
 
-function enterNewChatState() {
+function enterNewChatState(projectLabel) {
   currentThreadId = null;
   currentStatus = 'idle';
   localStorage.removeItem('activeThreadId');
   if (window.location.hash.startsWith('#thread-')) {
     history.replaceState(null, '', window.location.pathname + window.location.search);
   }
-  safeSetText(activeSessionTitle, '新对话');
-  if (activeSessionTitle) activeSessionTitle.title = '新对话';
+  const titleText = projectLabel ? `新对话 · ${projectLabel}` : '新对话';
+  safeSetText(activeSessionTitle, titleText);
+  if (activeSessionTitle) activeSessionTitle.title = titleText;
   document.querySelectorAll('.thread-item.active').forEach((el) => el.classList.remove('active'));
   if (chatFeed) {
-    chatFeed.innerHTML = '<div class="empty-state"><h2>新对话</h2><p>输入指令开始。标题会在首轮对话后自动生成，也可双击侧栏会话重命名。</p></div>';
+    chatFeed.innerHTML = projectLabel
+      ? `<div class="empty-state"><h2>新对话</h2><p>将在项目「${escapeHtml(projectLabel)}」中开始。输入指令开始，标题会在首轮对话后自动生成，也可双击侧栏会话重命名。</p></div>`
+      : '<div class="empty-state"><h2>新对话</h2><p>输入指令开始。标题会在首轮对话后自动生成，也可双击侧栏会话重命名。</p></div>';
   }
+}
+
+// 从目标 cwd 推导项目显示名：优先匹配已知项目，兜底用目录名
+function projectLabelFromCwd(cwd) {
+  const raw = String(cwd || '').trim().replace(/[\\/]+$/, '');
+  if (!raw || raw === '/' || /^[a-zA-Z]:$/.test(raw)) return '';
+  const key = raw.toLowerCase();
+  const proj = (sidebarProjectsCache || []).find((p) => p && p.cwd && p.cwd.replace(/[\\/]+$/, '').toLowerCase() === key);
+  if (proj && proj.name) return proj.name;
+  const parts = raw.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || '';
 }
 
 function placeholderTitleFromCwd(cwd) {
@@ -1853,11 +1882,40 @@ function submitNewProject(ev) {
   createNewChat(cwd);
 }
 
+// 新建会话乐观切换：请求发出后立即进入"新对话"视图给出反馈，
+// 真实线程就绪后由 thread_created / HTTP 响应无缝接管；15s 超时兜底解锁
+let creatingThread = false;
+let creatingThreadTimer = null;
+let creatingProjectKey = ''; // 正在新建会话的目标项目名，用于侧边栏文件夹高亮
+function beginCreatingThread() {
+  if (creatingThread) return false;
+  creatingThread = true;
+  clearTimeout(creatingThreadTimer);
+  creatingThreadTimer = setTimeout(() => { endCreatingThread(); }, 15000);
+  return true;
+}
+function endCreatingThread() {
+  creatingThread = false;
+  clearTimeout(creatingThreadTimer);
+  if (creatingProjectKey) {
+    creatingProjectKey = '';
+    lastSidebarRenderSig = '';
+    renderSidebarLists();
+  }
+}
+
 function createNewChat(targetCwd) {
   if (!sessionReady) {
     showAuthOverlay(connMode === 'relay' ? 'pair' : 'login');
     return;
   }
+  if (!beginCreatingThread()) return;
+  const projectLabel = projectLabelFromCwd(targetCwd);
+  creatingProjectKey = projectLabel;
+  enterNewChatState(projectLabel);
+  if (msgInput) msgInput.focus();
+  lastSidebarRenderSig = '';
+  renderSidebarLists();
   const title = placeholderTitleFromCwd(targetCwd);
   const payload = {
     type: 'create_thread',
@@ -2104,6 +2162,7 @@ async function createThreadHTTP(title, targetCwd) {
     });
     const json = await res.json();
     if (json.success && json.threadId) {
+      endCreatingThread();
       selectThread(json.threadId, json.title || title);
       if (pendingFirstSend) {
         const pending = pendingFirstSend;
@@ -2113,9 +2172,11 @@ async function createThreadHTTP(title, targetCwd) {
         }
       }
     } else {
+      endCreatingThread();
       alert(`新建会话失败: ${json.error || '未知错误'}`);
     }
   } catch (e) {
+    endCreatingThread();
     console.error('HTTP create thread error:', e);
     alert(`新建会话失败: ${e.message}`);
   }

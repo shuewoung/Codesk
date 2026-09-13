@@ -4,6 +4,8 @@
   "main": "index.ts",
   "dependencies": {
     "@expo/metro-runtime": "~6.1.2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "expo": "~54.0.37",
     "expo-camera": "~17.0.10",
     "expo-clipboard": "~8.0.8",
@@ -13,6 +15,7 @@
     "expo-file-system": "~19.0.24",
     "expo-image-picker": "~17.0.11",
     "expo-secure-store": "~15.0.8",
+    "expo-sharing": "~14.0.8",
     "expo-status-bar": "~3.0.9",
     "jcore-react-native": "^2.3.7",
     "jpush-react-native": "^3.2.8",
@@ -22,6 +25,7 @@
     "react-native-markdown-display": "^7.0.2",
     "react-native-safe-area-context": "~5.6.0",
     "react-native-web": "^0.21.0",
+    "react-native-webview": "^14.0.1",
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
@@ -39,7 +43,7 @@
     "export:web": "node scripts/export-web.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "tsx --test src/protocol.test.ts src/history.test.ts src/workspace.test.ts src/quota.test.ts src/handshake.test.ts src/api.test.ts src/discover.test.ts src/push.test.ts src/thread-route.test.ts test/relay-client.test.ts scripts/hub-proxy.test.mjs"
+    "test": "tsx --test src/typed-history.test.ts src/protocol.test.ts src/history.test.ts src/workspace.test.ts src/quota.test.ts src/handshake.test.ts src/api.test.ts src/discover.test.ts src/push.test.ts src/thread-route.test.ts src/session-transport.test.ts src/composer-draft.test.ts src/draft-sync.test.ts src/session-reliability.test.ts src/pending-commands.test.ts src/force-clear-lock.test.ts src/failed-sends.test.ts src/recent-threads.test.ts src/utils/localFileUrl.test.ts src/utils/file-panel.test.ts src/utils/thread-ui.test.ts src/request-state.test.ts src/composer-safety.test.ts src/download.test.ts test/relay-client.test.ts scripts/hub-proxy.test.mjs"
   },
   "private": true
 }

@@ -172,8 +172,16 @@ export class Store {
     this.persist();
   }
 
-  createPairCode({ hubId, ttlSec, hubE2ePub = '' }) {
+  createPairCode({ hubId, ttlSec = 0, hubE2ePub = '', refresh = false }) {
     if (!this.getHub(hubId)) throw new RelayError('unknown_hub', 'unknown hub', 404);
+    if (!(ttlSec > 0)) {
+      const existing = Object.values(this.state.pairCodes).find((rec) => rec.hubId === hubId && rec.persistent && !rec.revokedAt);
+      if (existing && !refresh) return existing;
+      // Manual replacement also invalidates outstanding legacy invitations, not devices.
+      for (const rec of Object.values(this.state.pairCodes)) {
+        if (rec.hubId === hubId) rec.revokedAt = nowIso();
+      }
+    }
     let code = randomPairCode();
     while (this.state.pairCodes[code]) code = randomPairCode();
     const hub = this.getHub(hubId);
@@ -183,7 +191,8 @@ export class Store {
       hubId,
       hubE2ePub: String(hubE2ePub || hub.e2ePub || ''),
       createdAt: nowIso(),
-      expiresAt: nowIso(nowMs() + Math.max(30, ttlSec || 600) * 1000),
+      expiresAt: ttlSec > 0 ? nowIso(nowMs() + Math.max(30, ttlSec) * 1000) : null,
+      persistent: !(ttlSec > 0),
       usedAt: null
     };
     this.state.pairCodes[code] = rec;
@@ -194,8 +203,8 @@ export class Store {
   redeemPairCode(code) {
     const key = normalizePairCode(code);
     const rec = this.state.pairCodes[key];
-    if (!rec || rec.usedAt) throw new RelayError('invalid_code', 'invalid pairing code', 401);
-    if (Date.parse(rec.expiresAt) <= nowMs()) {
+    if (!rec || rec.revokedAt || (!rec.persistent && rec.usedAt)) throw new RelayError('invalid_code', 'invalid pairing code', 401);
+    if (rec.expiresAt && Date.parse(rec.expiresAt) <= nowMs()) {
       throw new RelayError('invalid_code', 'pairing code expired', 401);
     }
     if (!this.getHub(rec.hubId)) throw new RelayError('unknown_hub', 'unknown hub', 404);

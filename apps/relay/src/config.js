@@ -35,7 +35,7 @@ export function loadConfig(env = process.env, overrides = {}) {
     tlsKey,
     adminToken: overrides.adminToken ?? env.RELAY_ADMIN_TOKEN ?? '',
     cookieName: overrides.cookieName || env.RELAY_COOKIE_NAME || 'onedesk_device',
-    pairTtlSec: overrides.pairTtlSec ?? num(env.RELAY_PAIR_TTL_SEC, 600),
+    pairTtlSec: overrides.pairTtlSec ?? num(env.RELAY_PAIR_TTL_SEC, 0),
     inviteTtlSec: overrides.inviteTtlSec ?? num(env.RELAY_INVITE_TTL_SEC, 0),
     maxHubs: overrides.maxHubs ?? num(env.RELAY_MAX_HUBS, 300),
     pingIntervalMs: overrides.pingIntervalMs ?? num(env.RELAY_PING_INTERVAL_MS, 20000),

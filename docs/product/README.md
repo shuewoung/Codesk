@@ -4,13 +4,15 @@
 
 | 编号 | 子项目 | 目录 | 分册 |
 |---|---|---|---|
-| 1 | Web 前端 | `apps/web/` | [01-web.md](01-web.md) |
+| 1 | Web 前端 | `apps/mobile/`（Web 导出） | [01-web.md](01-web.md) |
 | 2 | 本机 Hub | `apps/web-hub/server/` | [02-hub.md](02-hub.md) |
 | 3 | VPS 中继 | `apps/relay/` | [03-relay.md](03-relay.md) |
 | 4 | Expo 客户端 | `apps/mobile/`（新建） | [05-native.md](05-native.md) |
 | — | 端到端加密 | 三端 + 中继 | [06-e2e.md](06-e2e.md) |
+| — | 用户体验提升与验收 | Expo + Hub + 安装链 | [09-ux-improvements.md](09-ux-improvements.md) |
+| — | 跨端工作台实施与验收 | Expo + Hub + Relay | [11-cross-device-workbench.md](11-cross-device-workbench.md) |
 
-先不拆仓。PWA（`apps/web/`）和 Expo（`apps/mobile/`）两套壳都保留，协议同一份。
+先不拆仓。Expo（`apps/mobile/`）是唯一活跃客户端；旧 PWA 已归档到 `archive/web/` 与 `archive/web-hub-public/`，不再托管。优先 Expo Web + Tailscale / 二维码，APK 专项后置。
 
 **其他窗口先读 [SYNC.md](SYNC.md)**（2026-08-19：HTTPS 中继、两套码、Expo Web、E2E/`no PRNG`）。
 
@@ -20,21 +22,21 @@ Codesk 是本机已登录 Codex 的远程控制面。口号：进了 ICU，还�
 
 ## 已拍板（不要再争论）
 
-1. **300 人 = 300 台 Hub + 1 台中继**，一人一 Codex 账号。禁止转发 `auth.json`。
+1. **300 人 = 300 台 Hub + 1 台中继**，一人一 Codex 账号。Hub 本机可读 `~/.codex/auth.json` 拉用量；禁止把文件或 token 发给中继 / 前端。
 2. **中继是哑管道**。不跑 agent、不读 JSONL、不存聊天正文。
 3. **v1 无邮箱账号。** 邀请开通 + 设备配对。局域网可另设本机口令。
 4. **出门必须 E2E。** 中继只看见信封（type / hubId / 大小 / 时间），看不见业务 JSON。Hub 公钥走二维码 `hk=`，不经中继明文传密钥。局域网直连仍明文。见 [06-e2e.md](06-e2e.md)。
-5. **同一套协议，两套壳。** 日常 UI 是 Expo（原生 + Web `:18991`）。Hub `:18990` 仍可回退旧 PWA，但旧壳不再加功能。VPS 出门页与 Expo 协议同一份。
+5. **同一套协议，Expo 单源。** 日常 UI 是 Expo Web `:18991`；Hub `:18990` 托管 Expo `dist-web`，不回退旧 PWA。VPS 出门页与 Expo 协议同一份。
 6. **业务协议不改名。** 现有 REST + WS 消息原样走。中继只加信封（注册 / 配对 / 转发 / 心跳）。
-7. **能局域网则直连 Hub**，失败再走中继。不做 WebRTC / 打洞 / 对外说 P2P。
-8. **电脑休眠 = 不能干活。** UI 必须显示「主机离线」，不做消息离线队列。
-9. **Hub 只做 Windows。** 出站连中继，不要求用户开端口。
+7. **能局域网则直连 Hub**，失败再走中继。当前走 HTTPS 中继，不宣传 P2P。
+8. **电脑休眠 = 不能干活。** UI 必须显示「主机离线」。
+9. **Hub 目前发 Windows 安装包。** 出站连中继，不要求用户开端口。
 10. **协议先改文档再改代码。** 三个窗口不准私自加字段。
-11. **两套码。** 家里码常驻，只给同一 WiFi 登录 Hub；出门码一次性，只给中继 `POST /api/relay/pair`。主机台 / 手机配对页必须左右分开，禁止一个输入框两用。
+11. **两套码。** 家里码固定 4 字符，用于 WiFi / Tailscale 直连 Hub；出门码长期有效、手动撤销，只给中继 `POST /api/relay/pair`。主机台 / 手机配对页必须左右分开，禁止一个输入框两用。
 
 ## 窗口纪律
 
-- 窗口 1 只改 `apps/web/` 和本分册。
+- 窗口 1 的 Web UI 与窗口 4 协调后只改 `apps/mobile/`；不要修改归档 PWA。
 - 窗口 2 只改 `apps/web-hub/server/`、`tests/` 和本分册。
 - 窗口 3 只建/改 `apps/relay/` 和本分册。
 - 窗口 4 只建/改 `apps/mobile/` 和 [05-native.md](05-native.md)。禁止改 PWA / Hub / 中继。
@@ -43,7 +45,7 @@ Codesk 是本机已登录 Codex 的远程控制面。口号：进了 ICU，还�
 
 ## 本轮不做
 
-官方 Remote Relay、Codex Cloud、真 PTY、Plugin 市场、邮箱登录、多机房、在中继上跑 Codex、WebRTC/P2P 打洞。
+不要在中继上跑 Codex，不要把 `auth.json` / access token 发给中继或前端，不要恢复 `archive/` 中的旧 PWA 为活跃入口。其余能力按需要做，不再当成禁令。
 
 ## 工作台现状（对照 PLAN，2026-08-22 按代码核对）
 
@@ -52,7 +54,8 @@ Codesk 是本机已登录 Codex 的远程控制面。口号：进了 ICU，还�
 | Hub 鉴权 | **已做** | — |
 | Diff / 命令卡 / 子智能体 / 第三审批按钮 | **已做** | PWA + Expo；命令卡默认折叠 |
 | `/` 菜单 | **已做**（PWA + Expo） | `/plan` `/review` 打开专用页，不再只当普通消息 |
-| 命令面板 / 只读 Git | **已做** | PWA 右侧「Git & 终端」；Expo 右栏 Git / 命令 |
+| 命令面板 / 只读 Git | **已做** | `$ ` 一次命令 + 只读 Git |
+| 交互终端 | **Expo 右栏「终端」** | ConPTY + PowerShell + xterm；`pty_open` / `pty_input` / `pty_data` |
 | 文件下载 | **已做** | PWA 先 WS `get_file`（中继可走），失败才 REST `/api/file`；Expo 出门一直走 WS |
 | Follower 审批 | **已做** | 直播 JSON-RPC `requestId` 优先；`kind` 可回退三种方法。本机再点一次确认即可 |
 | 速度菜单 / pin 写入 Desktop / 推理折叠 | **已做** | pin + 归档 sidecar 物化；速度菜单写 `service_tier`；推理块默认折叠可展开 |
