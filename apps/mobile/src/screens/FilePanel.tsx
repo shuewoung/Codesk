@@ -29,6 +29,12 @@ function collectDirs(nodes: TreeNode[], out: string[] = []): string[] {
   return out;
 }
 
+function shortTurnId(id?: string): string {
+  const s = String(id || '').trim();
+  if (!s) return '';
+  return s.length > 16 ? `${s.slice(0, 8)}…${s.slice(-4)}` : s;
+}
+
 function filterTree(nodes: TreeNode[], q: string): TreeNode[] {
   if (!q) return nodes;
   const lower = q.toLowerCase();
@@ -95,6 +101,7 @@ export function FilePanel({
   const artifacts = artifactsVisible ? workspace.artifacts.filter(file => (!file.threadId || file.threadId === threadId) && (artifactFilter === 'all' || (artifactFilter === 'images' ? /\.(png|jpe?g|webp|gif)$/i.test(file.path) : !/\.(png|jpe?g|webp|gif)$/i.test(file.path)))).sort((a, b) => String(a.turnId || '').localeCompare(String(b.turnId || ''))) : [];
   const artifactLabel = artifactsVisible && workspace.artifactsScope === 'session_confirmed' ? '会话已确认文件' : '本次产物';
   const [copied, setCopied] = useState('');
+  const [copiedTurn, setCopiedTurn] = useState(false);
 
   useEffect(() => {
     if (threadId) requestTree(threadId, cwd);
@@ -152,16 +159,24 @@ export function FilePanel({
     setTimeout(() => setCopied(''), 1600);
   }
 
+  async function copyTurnId(id: string) {
+    const next = String(id || '').trim();
+    if (!next) return;
+    await Clipboard.setStringAsync(next);
+    setCopiedTurn(true);
+    setTimeout(() => setCopiedTurn(false), 1600);
+  }
+
   return (
     <View style={[styles.root, { backgroundColor: colors.shell }]}>
-      <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: space.md, paddingTop: 10 }}>
+      <View style={[styles.tabBar, { backgroundColor: colors.card, marginTop: 10, marginHorizontal: space.md }]}>
         {([
           ['artifacts', artifactLabel],
           ['files', '项目文件'],
           ['git', 'Git'],
           ['term', '终端'],
         ] as const).filter(([id]) => !onSelectFiles || id === 'files' || id === 'artifacts').map(([id, label]) => (
-          <Pressable key={id} onPress={() => setTab(id)} hitSlop={6}>
+          <Pressable key={id} onPress={() => setTab(id)} style={[styles.tabItem, tab === id && { backgroundColor: colors.bg }]}>
             <Text style={{ color: tab === id ? colors.text : colors.muted, fontSize: 13, fontWeight: tab === id ? '700' : '500' }}>
               {label}
             </Text>
@@ -239,28 +254,76 @@ export function FilePanel({
           <Text style={{ color: colors.muted, fontSize: 12, paddingHorizontal: space.md }}>打开一个会话后再用终端。</Text>
         )
       ) : null}
-      {(tab === 'artifacts' || tab === 'files') ? <View style={{ paddingHorizontal: space.md, paddingVertical: 6, gap: 6 }}>
-        {panelRequest?.status === 'loading' ? <Text style={{ color: colors.muted }}>正在加载…</Text> : null}
-        {panelRequest?.status === 'error' || panelRequest?.status === 'timeout' ? <Text style={{ color: colors.danger }}>{panelRequest.error || '加载失败，请重试'}</Text> : null}
-        <Pressable onPress={() => { if (threadId) { workspace.requestTree(threadId, cwd); workspace.listArtifacts(threadId, cwd); } }}><Text style={{ color: colors.text }}>刷新文件</Text></Pressable>
-      </View> : null}
+      {(tab === 'artifacts' || tab === 'files') && (panelRequest?.status === 'error' || panelRequest?.status === 'timeout' || (tab === 'files' && panelRequest?.status === 'loading')) ? (
+        <View style={{ paddingHorizontal: space.md, paddingTop: 8 }}>
+          <Text style={{ color: panelRequest?.status === 'loading' ? colors.muted : colors.danger, fontSize: 12 }}>
+            {panelRequest?.status === 'loading' ? '正在加载…' : panelRequest.error || '加载失败，请重试'}
+          </Text>
+        </View>
+      ) : null}
       {tab === 'artifacts' ? <ScrollView contentContainerStyle={styles.list}>
-        <View style={{ flexDirection: 'row', gap: 16, padding: 12 }}>{(['all', 'images', 'documents'] as const).map(filter => <Pressable key={filter} onPress={() => setArtifactFilter(filter)}><Text style={{ color: artifactFilter === filter ? colors.text : colors.muted }}>{filter === 'all' ? '全部产物' : filter === 'images' ? '图片' : '其他文件'}</Text></Pressable>)}</View>
-        <Text style={{ color: colors.muted, padding: space.md }}>{cycle.active ? '本轮运行中，已隐藏上一轮产物；完成后自动刷新。' : artifactsVisible && workspace.artifactsScope === 'session_confirmed' ? '未能确定最新轮次边界，下列为会话已确认文件，不代表本次生成。' : '仅展示最新轮次真实产物记录；项目近期文档不计为产物。'}</Text>
-        {artifactsVisible && workspace.artifactsCoverage?.truncated ? <Text style={{ color: colors.warn, paddingHorizontal: space.md }}>索引范围有限：仅读取 {formatFileSize(workspace.artifactsCoverage.bytesRead)} / {formatFileSize(workspace.artifactsCoverage.totalBytes)}，可能遗漏文件。</Text> : null}
-        {artifactsVisible && workspace.artifactsTurnId ? <Text style={{ color: colors.muted, paddingHorizontal: space.md, fontSize: 11 }}>轮次：{workspace.artifactsTurnId}</Text> : null}
-        {!artifacts.length ? <Text style={{ color: colors.muted, padding: space.md }}>{artifactRequest?.status === 'loading' ? '正在读取产物记录…' : '暂无已确认产物'}</Text> : artifacts.map((file, index) => (
-          <View key={file.path} style={{ padding: 10, gap: 6 }}>
-            {index === 0 || file.turnId !== artifacts[index - 1].turnId ? <Text style={{ color: colors.muted }}>轮次：{file.turnId || '会话已确认（轮次未知）'}</Text> : null}
+        <View style={styles.artifactToolbar}>
+          <View style={[styles.filterGroup, { backgroundColor: colors.card }]}>
+            {(['all', 'images', 'documents'] as const).map(filter => (
+              <Pressable key={filter} onPress={() => setArtifactFilter(filter)} style={[styles.filterItem, artifactFilter === filter && { backgroundColor: colors.bg }]}>
+                <Text style={{ color: artifactFilter === filter ? colors.text : colors.muted, fontSize: 12.5, fontWeight: artifactFilter === filter ? '700' : '500' }}>
+                  {filter === 'all' ? '全部' : filter === 'images' ? '图片' : '其他文件'}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          <Pressable
+            onPress={() => { if (threadId) { workspace.requestTree(threadId, cwd); workspace.listArtifacts(threadId, cwd); } }}
+            style={[styles.chip, { backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth }]}
+            hitSlop={6}
+          >
+            <Text style={{ color: colors.text, fontSize: 12.5 }}>↻ 刷新</Text>
+          </Pressable>
+        </View>
+        <View style={[styles.noteCard, { backgroundColor: colors.card }]}>
+          <Text style={{ color: colors.muted, fontSize: 11.5, lineHeight: 17 }}>
+            {cycle.active ? '本轮运行中，已隐藏上一轮产物；完成后自动刷新。' : artifactsVisible && workspace.artifactsScope === 'session_confirmed' ? '未能确定最新轮次边界，下列为会话已确认文件，不代表本次生成。' : '仅展示最新轮次真实产物记录；项目近期文档不计为产物。'}
+          </Text>
+        </View>
+        {artifactsVisible && workspace.artifactsCoverage?.truncated ? (
+          <View style={[styles.noteCard, { backgroundColor: colors.card, borderColor: colors.warn, borderWidth: StyleSheet.hairlineWidth }]}>
+            <Text style={{ color: colors.warn, fontSize: 11.5, lineHeight: 17 }}>索引范围有限：仅读取 {formatFileSize(workspace.artifactsCoverage.bytesRead)} / {formatFileSize(workspace.artifactsCoverage.totalBytes)}，可能遗漏文件。</Text>
+          </View>
+        ) : null}
+        {artifactsVisible && workspace.artifactsTurnId ? (
+          <Pressable onPress={() => { void copyTurnId(workspace.artifactsTurnId || ''); }} style={styles.turnRow}>
+            <View style={[styles.turnBadge, { borderColor: colors.line }]}>
+              <Text style={{ color: colors.muted, fontSize: 11 }}>轮次 {shortTurnId(workspace.artifactsTurnId)}</Text>
+            </View>
+            <Text style={{ color: copiedTurn ? colors.ok : colors.muted, fontSize: 11 }}>{copiedTurn ? '已复制' : '点按复制'}</Text>
+          </Pressable>
+        ) : null}
+        {!artifacts.length ? (
+          <View style={styles.emptyState}>
+            <FileIcon name="file" size={34} />
+            <Text style={{ color: colors.text, fontSize: 14, fontWeight: '600' }}>
+              {artifactRequest?.status === 'loading' ? '正在读取产物记录…' : '暂无已确认产物'}
+            </Text>
+            <Text style={{ color: colors.muted, fontSize: 12, textAlign: 'center', lineHeight: 17 }}>
+              {cycle.active ? '本轮完成后，新生成的文件会自动出现在这里。' : '本轮任务新生成的文件会显示在这里。'}
+            </Text>
+          </View>
+        ) : artifacts.map((file, index) => (
+          <View key={file.path} style={[styles.artifactCard, { backgroundColor: colors.bg, borderColor: colors.line }]}>
+            {index === 0 || file.turnId !== artifacts[index - 1].turnId ? (
+              <Text style={{ color: colors.muted, fontSize: 11 }}>轮次 {file.turnId ? shortTurnId(file.turnId) : '会话已确认（轮次未知）'}</Text>
+            ) : null}
             <Pressable onPress={() => onSelectFiles ? toggleFile({ ...file, isDir: false }) : onOpenFile(file.path)} style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
               <FileIcon name={file.name} />
-              <Text style={{ flex: 1, color: colors.text }}>{onSelectFiles ? (selected[file.path] ? '[已选] ' : '[选择] ') : ''}{file.name}</Text>
+              <Text style={{ flex: 1, color: colors.text, fontSize: 13.5, fontWeight: '500' }} numberOfLines={1}>
+                {onSelectFiles ? (selected[file.path] ? '[已选] ' : '[选择] ') : ''}{file.name}
+              </Text>
             </Pressable>
-            <Text selectable style={{ color: colors.muted, fontSize: 11 }}>{file.path}</Text>
-            <Text style={{ color: colors.muted, fontSize: 11 }}>{formatFileSize(file.size)}{file.mtimeMs ? ` · ${new Date(file.mtimeMs).toLocaleString()}` : ''}{file.turnId ? ` · 轮次 ${file.turnId}` : ''}{file.timestamp ? ` · ${file.timestamp}` : ''}</Text>
-            <View style={{ flexDirection: 'row', gap: 16 }}>
-              <Pressable onPress={() => onOpenFile(file.path)}><Text style={{ color: colors.text }}>预览</Text></Pressable>
-              <Pressable onPress={() => { setTab('files'); setLocated(file.path); setFilterQ(file.name); if (threadId) workspace.requestTree(threadId, cwd, parentPath(file.path)); }}><Text style={{ color: colors.text }}>在项目中定位</Text></Pressable>
+            <Text selectable numberOfLines={1} style={{ color: colors.muted, fontSize: 11 }}>{file.path}</Text>
+            <Text style={{ color: colors.muted, fontSize: 11 }}>{formatFileSize(file.size)}{file.mtimeMs ? ` · ${new Date(file.mtimeMs).toLocaleString()}` : ''}{file.turnId ? ` · 轮次 ${shortTurnId(file.turnId)}` : ''}{file.timestamp ? ` · ${file.timestamp}` : ''}</Text>
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 2 }}>
+              <Pressable onPress={() => onOpenFile(file.path)} style={[styles.miniAction, { borderColor: colors.line }]}><Text style={{ color: colors.text, fontSize: 12 }}>预览</Text></Pressable>
+              <Pressable onPress={() => { setTab('files'); setLocated(file.path); setFilterQ(file.name); if (threadId) workspace.requestTree(threadId, cwd, parentPath(file.path)); }} style={[styles.miniAction, { borderColor: colors.line }]}><Text style={{ color: colors.text, fontSize: 12 }}>在项目中定位</Text></Pressable>
             </View>
           </View>
         ))}
@@ -305,6 +368,13 @@ export function FilePanel({
           onPress={() => setOpen({})}
         >
           <Text style={{ color: colors.text, fontSize: 13 }}>全部折叠</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.chip, { backgroundColor: colors.card, borderColor: colors.line, borderWidth: StyleSheet.hairlineWidth }]}
+          hitSlop={6}
+          onPress={() => { if (threadId) { workspace.requestTree(threadId, cwd); workspace.listArtifacts(threadId, cwd); } }}
+        >
+          <Text style={{ color: colors.text, fontSize: 13 }}>↻ 刷新</Text>
         </Pressable>
       </View>
       {located ? <Text selectable style={{ color: colors.muted, paddingHorizontal: space.md }}>定位：{located}</Text> : null}
@@ -537,6 +607,17 @@ const styles = StyleSheet.create({
   root: { flex: 1 },
   head: { fontSize: 17, fontWeight: '700', paddingHorizontal: space.md, paddingTop: 14 },
   cwd: { fontSize: 12, paddingHorizontal: space.md, paddingBottom: 6 },
+  tabBar: { flexDirection: 'row', borderRadius: radius.pill, padding: 3 },
+  tabItem: { flex: 1, alignItems: 'center', paddingVertical: 6, borderRadius: radius.pill },
+  artifactToolbar: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: space.md, paddingTop: 12 },
+  filterGroup: { flexDirection: 'row', borderRadius: radius.pill, padding: 3 },
+  filterItem: { borderRadius: radius.pill, paddingVertical: 5, paddingHorizontal: 12, alignItems: 'center' },
+  noteCard: { borderRadius: radius.sm, padding: 10, marginHorizontal: space.md, marginTop: 10 },
+  turnRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: space.md, marginTop: 8 },
+  turnBadge: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 3 },
+  emptyState: { alignItems: 'center', gap: 8, paddingVertical: 56, paddingHorizontal: space.lg },
+  artifactCard: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.md, padding: 12, gap: 5, marginHorizontal: space.md, marginTop: 10 },
+  miniAction: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 3 },
   searchInput: { borderWidth: 1, borderRadius: radius.pill, paddingHorizontal: 12, paddingVertical: 6, fontSize: 13 },
   actions: { flexDirection: 'row', gap: 6, paddingHorizontal: space.md, paddingBottom: 6 },
   chip: { borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 4 },
