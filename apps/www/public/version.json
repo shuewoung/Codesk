@@ -1,7 +1,7 @@
 {
-  "version": "1.0.11",
-  "versionCode": 111,
-  "releaseDate": "2026-08-23",
-  "changelog": "1. 修复长对话中消息列表偶发崩溃的问题\n2. 打字与流式输出渲染大幅提速，长会话更流畅\n3. 历史消息分批加载，向上翻更稳\n4. 文件缓存加上限，久用内存更稳\n5. APK 体积与启动速度优化",
+  "version": "1.0.12",
+  "versionCode": 112,
+  "releaseDate": "2026-09-14",
+  "changelog": "1. 跨端工作台：执行位置可见可交接，忙碌自动排队且可取消\n2. 发送与会话接续更可靠：断线自动补齐，失败明确标出\n3. 草稿跨设备同步、Hub 提问在手机作答\n4. 只读 Git 差异审阅、原件下载带校验\n5. 「本次产物」面板视觉重构",
   "downloadUrl": "https://codesk.icu/codesk-latest.apk"
 }
