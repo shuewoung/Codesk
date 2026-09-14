@@ -2,7 +2,7 @@
   "expo": {
     "name": "Codesk",
     "slug": "codesk",
-    "version": "1.0.11",
+    "version": "1.0.12",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -29,7 +29,7 @@
     },
     "android": {
       "package": "icu.codesk.hub",
-      "versionCode": 111,
+      "versionCode": 112,
       "usesCleartextTraffic": true,
       "permissions": [
         "android.permission.INTERNET",

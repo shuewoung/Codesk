@@ -1,6 +1,6 @@
 {
   "name": "codesk-hub",
-  "version": "1.0.10",
+  "version": "1.0.12",
   "description": "Codesk Hub: local Codex remote control surface",
   "main": "server/index.js",
   "type": "module",
