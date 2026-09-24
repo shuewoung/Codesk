@@ -230,8 +230,7 @@ html, body {
 }
 
 .status-connected .status-dot {
-  background: var(--accent-openai);
-  box-shadow: 0 0 6px var(--accent-openai);
+  background: #22c55e;
 }
 
 .status-disconnected .status-dot {
@@ -832,9 +831,9 @@ html, body {
 
 /* Reasoning / Thinking Card */
 .reasoning-card {
-  background: #fafbff;
-  border: 1px solid rgba(79, 107, 255, 0.1);
-  border-left: 3px solid rgba(79, 107, 255, 0.35);
+  background: #f9f9fb;
+  border: 1px solid var(--border-color);
+  border-left: 3px solid #d4d7dc;
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   margin: 8px 0;
   overflow: hidden;
@@ -844,7 +843,7 @@ html, body {
   padding: 7px 12px;
   font-size: 13px;
   font-weight: 600;
-  color: var(--accent-blue);
+  color: var(--text-muted);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -854,7 +853,7 @@ html, body {
 }
 
 .reasoning-header:hover {
-  background: rgba(79, 107, 255, 0.04);
+  background: rgba(0, 0, 0, 0.02);
 }
 
 .reasoning-body {
@@ -864,7 +863,7 @@ html, body {
   font-style: italic;
   line-height: 1.65;
   background: transparent;
-  border-top: 1px solid rgba(79, 107, 255, 0.08);
+  border-top: 1px solid var(--border-color);
 }
 
 /* Markdown Compact Clean Serif Typography (Claude Code Style) */
@@ -983,7 +982,7 @@ html, body {
   display: block;
   background: #fff;
   border: 1px solid var(--border-color);
-  border-left: 3px solid #16a34a;
+  border-left: 3px solid #d4d7dc;
   border-radius: var(--radius-md);
   margin: 8px 0;
   overflow: hidden;
@@ -999,7 +998,7 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #f6fef9;
+  background: #f8f9fc;
 }
 
 .file-change-left {
@@ -1012,13 +1011,13 @@ html, body {
   width: 32px;
   height: 32px;
   border-radius: var(--radius-sm);
-  border: 1px solid rgba(22, 163, 74, 0.2);
-  background: rgba(22, 163, 74, 0.08);
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 15px;
-  color: #16a34a;
+  color: var(--text-muted);
 }
 
 .file-change-title {
@@ -1141,12 +1140,12 @@ html, body {
 
 .markdown-body code {
   font-family: var(--font-mono);
-  font-size: 14px;
+  font-size: 13.5px;
   background: #f1f5f9;
-  border: 1px solid #cbd5e1;
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  color: #0284c7;
+  border: 1px solid #e2e8f0;
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: var(--text-main);
 }
 
 .markdown-body pre {
@@ -1211,19 +1210,19 @@ html, body {
 
 .markdown-body ul, .markdown-body ol {
   padding-left: 20px;
-  margin-top: 2px;
-  margin-bottom: 4px;
+  margin-top: 4px;
+  margin-bottom: 8px;
 }
 
 .markdown-body li {
-  margin-bottom: 2px;
+  margin-bottom: 4px;
 }
 
 .markdown-body blockquote {
-  border-left: 4px solid var(--accent-openai);
+  border-left: 3px solid #d4d7dc;
   padding-left: 12px;
   color: var(--text-muted);
-  margin: 4px 0;
+  margin: 6px 0;
 }
 
 .hidden {
@@ -1464,14 +1463,14 @@ html, body {
 }
 
 .input-card:focus-within {
-  border-color: var(--accent-openai);
-  box-shadow: 0 0 0 3px rgba(16, 163, 127, 0.15), 0 4px 16px rgba(16, 163, 127, 0.06);
+  border-color: rgba(79, 107, 255, 0.4);
+  box-shadow: 0 0 0 2px rgba(79, 107, 255, 0.08), 0 4px 16px rgba(0, 0, 0, 0.04);
 }
 
 .input-card.drag-over {
-  border-color: var(--accent-openai) !important;
-  background: #f0fdf4 !important;
-  box-shadow: 0 0 0 3px rgba(16, 163, 127, 0.25) !important;
+  border-color: rgba(79, 107, 255, 0.5) !important;
+  background: #f8f9ff !important;
+  box-shadow: 0 0 0 2px rgba(79, 107, 255, 0.12) !important;
 }
 
 #msg-input {
@@ -3434,14 +3433,9 @@ pre.code-block.expanded {
 .command-card {
   background: #f8f9fc;
   border: 1px solid var(--border-color);
-  border-left: 3px solid rgba(123, 140, 255, 0.5);
+  border-left: 3px solid #d4d7dc;
   border-radius: var(--radius-md);
   overflow: hidden;
-  transition: border-left-color 0.15s ease;
-}
-
-.command-card:hover {
-  border-left-color: var(--accent-purple);
 }
 
 .command-card-head {
@@ -3452,7 +3446,7 @@ pre.code-block.expanded {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-muted);
-  background: rgba(123, 140, 255, 0.04);
+  background: transparent;
   border-bottom: 1px solid var(--border-color);
   letter-spacing: 0.3px;
   text-transform: uppercase;
@@ -3460,7 +3454,7 @@ pre.code-block.expanded {
 
 .command-card-icon {
   font-family: var(--font-mono);
-  color: var(--accent-purple);
+  color: var(--text-dim);
   font-size: 14px;
 }
 
