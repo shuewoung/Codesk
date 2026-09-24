@@ -3515,3 +3515,148 @@ pre.code-block.expanded {
   min-width: 0;
   flex: 1;
 }
+
+/* ============================================================
+   UI Polish — chat readability, input auto-resize, scroll btn
+   ============================================================ */
+
+/* Give the chat feed a comfortable max-width and auto-centering */
+.chat-feed {
+  padding: 12px 20px 16px;
+  gap: 6px;
+}
+
+/* Wider centering column on large screens */
+@media (min-width: 900px) {
+  .chat-feed {
+    padding-left: max(20px, calc(50% - 380px));
+    padding-right: max(20px, calc(50% - 380px));
+  }
+}
+
+/* User message bubble — slightly warmer and better shadow */
+.message-card.role-user {
+  background: #f0f1f7;
+  border-radius: 18px 18px 4px 18px;
+  box-shadow: 0 1px 3px rgba(79, 107, 255, 0.08);
+  padding: 10px 16px;
+}
+
+/* Assistant response: add subtle top spacing between turns */
+.assistant-flow-block {
+  margin-top: 4px;
+  margin-bottom: 2px;
+}
+
+/* Slightly more breathing room in markdown */
+.markdown-body {
+  line-height: 1.65;
+}
+
+.markdown-body p {
+  margin-bottom: 6px;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.4em;
+  margin-bottom: 6px;
+}
+
+.markdown-body li {
+  margin-bottom: 3px;
+}
+
+.markdown-body pre {
+  margin: 8px 0;
+}
+
+/* Reasoning card: left accent stripe */
+.reasoning-card {
+  border-left: 3px solid var(--border-color);
+  padding-left: 12px;
+  margin: 4px 0;
+}
+
+.reasoning-header {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.01em;
+}
+
+/* Command card: cleaner */
+.command-card {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  background: #f8fafc;
+  margin: 4px 0;
+}
+
+/* Input textarea: auto-resize, remove fixed rows look */
+#msg-input {
+  resize: none;
+  overflow-y: auto;
+  min-height: 44px;
+  max-height: 200px;
+  --input-max-height: 200;
+  line-height: 1.55;
+  padding: 10px 12px;
+  font-size: 15px;
+  font-family: var(--font-sans);
+  color: var(--text-main);
+  background: transparent;
+  border: none;
+  outline: none;
+  width: 100%;
+  display: block;
+  transition: none;
+}
+
+/* Input card focus ring uses the accent color */
+.input-card:focus-within {
+  border-color: var(--accent-claude);
+  box-shadow: 0 0 0 3px rgba(79, 107, 255, 0.12), 0 4px 16px rgba(79, 107, 255, 0.06);
+}
+
+/* Scroll-to-bottom floating button */
+.btn-scroll-bottom {
+  position: absolute;
+  bottom: 12px;
+  right: 18px;
+  z-index: 55;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  transition: opacity 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+  opacity: 1;
+}
+
+.btn-scroll-bottom.hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(6px);
+}
+
+.btn-scroll-bottom:hover {
+  background: var(--bg-secondary);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.14);
+  color: var(--text-main);
+}
+
+.btn-scroll-bottom:active {
+  transform: scale(0.92);
+}
+
+/* Make the chat container position: relative so btn-scroll-bottom sits in it */
+.chat-container {
+  position: relative;
+}
