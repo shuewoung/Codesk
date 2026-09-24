@@ -2794,7 +2794,10 @@ function clearComposer() {
   }
   pendingAttachments = [];
   renderAttachmentChips();
-  if (msgInput) msgInput.value = '';
+  if (msgInput) {
+    msgInput.value = '';
+    msgInput.style.height = 'auto';
+  }
 }
 
 function buildTurnInput() {
@@ -2910,7 +2913,7 @@ msgInput.addEventListener('keydown', (e) => {
       return;
     }
   }
-  if (e.key === 'Enter' && !e.shiftKey) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     handleMainAction();
   }
@@ -3836,10 +3839,35 @@ function applySlashItem(cmd) {
   handleMainAction();
 }
 
+// Auto-resize textarea as content grows/shrinks
+function autoResizeMsgInput() {
+  if (!msgInput) return;
+  msgInput.style.height = 'auto';
+  const maxH = parseInt(getComputedStyle(msgInput).getPropertyValue('--input-max-height') || '200', 10);
+  msgInput.style.height = Math.min(msgInput.scrollHeight, maxH) + 'px';
+}
+
 if (msgInput) {
   msgInput.addEventListener('input', () => {
+    autoResizeMsgInput();
     if ((msgInput.value || '').startsWith('/')) renderSlashMenu();
     else hideSlashMenu();
+  });
+}
+
+// Scroll-to-bottom button logic
+const btnScrollBottom = document.getElementById('btn-scroll-bottom');
+function updateScrollBottomBtn() {
+  if (!chatFeed || !btnScrollBottom) return;
+  const distFromBottom = chatFeed.scrollHeight - chatFeed.scrollTop - chatFeed.clientHeight;
+  btnScrollBottom.classList.toggle('hidden', distFromBottom < 80);
+}
+if (chatFeed) {
+  chatFeed.addEventListener('scroll', updateScrollBottomBtn, { passive: true });
+}
+if (btnScrollBottom) {
+  btnScrollBottom.addEventListener('click', () => {
+    if (chatFeed) chatFeed.scrollTo({ top: chatFeed.scrollHeight, behavior: 'smooth' });
   });
 }
 
