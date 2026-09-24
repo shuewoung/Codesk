@@ -835,7 +835,7 @@ html, body {
 
 .reasoning-header {
   padding: 4px 0;
-  font-size: 14px;
+  font-size: 13px;
   color: var(--text-muted);
   display: flex;
   align-items: center;
@@ -848,13 +848,29 @@ html, body {
   background: rgba(0, 0, 0, 0.02);
 }
 
+.reasoning-preview {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  opacity: 0.75;
+}
+
+.reasoning-toggle-icon {
+  font-size: 11px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
 .reasoning-body {
-  padding: 4px 0;
-  font-size: 15px;
-  color: #334155;
+  padding: 8px 0 4px 22px;
+  font-size: 14px;
+  color: #475569;
   font-style: italic;
-  line-height: 1.6;
+  line-height: 1.65;
   background: #ffffff;
+  border-left: 2px solid #d4d7dc;
+  margin-left: 4px;
 }
 
 /* Markdown Compact Clean Serif Typography (Claude Code Style) */

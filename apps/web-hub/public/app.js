@@ -528,14 +528,19 @@ function showAuthOverlay(mode) {
   if (!authOverlay) return;
   authOverlay.classList.remove('hidden');
   if (authOffline) authOffline.classList.toggle('hidden', mode !== 'offline');
-  if (authLoginForm) authLoginForm.classList.remove('hidden');
-  if (authPairForm) authPairForm.classList.remove('hidden');
+  // 按情境只显示对应表单，避免两个同时可见造成困惑
+  if (authLoginForm) authLoginForm.classList.toggle('hidden', mode === 'pair');
+  if (authPairForm) authPairForm.classList.toggle('hidden', mode !== 'pair');
   if (btnAuthLogout) btnAuthLogout.classList.toggle('hidden', !sessionReady && !deviceToken);
   if (authLanUrl && lanBase) authLanUrl.value = lanBase;
   if (authLead) {
-    authLead.textContent = mode === 'offline'
-      ? '无法连上本机 Hub。'
-      : '家里码和出门码不是同一个。看电脑主机台：左家里，右出门。';
+    if (mode === 'offline') {
+      authLead.textContent = '无法连上本机 Hub。';
+    } else if (mode === 'pair') {
+      authLead.textContent = '输入出门码或扫右侧二维码连接中继。';
+    } else {
+      authLead.textContent = '输入家里码，连接局域网内的本机 Hub。';
+    }
   }
   if (mode === 'offline') setConnPill('offline', '主机离线');
 }
@@ -2328,6 +2333,31 @@ function renderDesktopFeedNodes(items, toolOutputs) {
       if (last && last.item) last.item = Object.assign({}, last.item, { output: item.output || item.content || item.stdout || '' });
     }
 
+    else if (type === 'reasoning') {
+      flushAssistantText();
+      flushAgentBatch();
+      flushCommandBatch();
+      const rawReasoning = typeof item.content === 'string' ? item.content :
+        (Array.isArray(item.content) ? item.content.map(c => c.text || '').join('\n') : '');
+      const reasoningText = cleanText(rawReasoning);
+      if (reasoningText) {
+        const uid = `reasoning-${i}-${Date.now()}`;
+        const preview = reasoningText.replace(/\n/g, ' ').substring(0, 60);
+        nodes.push(`
+          <div class="reasoning-card" id="${uid}">
+            <div class="reasoning-header" data-action="toggle-reasoning" data-target="${uid}">
+              <span>💭</span>
+              <span class="reasoning-preview">${escapeHtml(preview)}${reasoningText.length > 60 ? '…' : ''}</span>
+              <span class="reasoning-toggle-icon">▸</span>
+            </div>
+            <div class="reasoning-body" style="display:none">
+              <div class="markdown-body">${renderMarkdown(reasoningText)}</div>
+            </div>
+          </div>
+        `);
+      }
+    }
+
     else if (type === 'context_compression' || type === 'auto_compressed') {
       flushAssistantText();
       flushAgentBatch();
@@ -2997,6 +3027,9 @@ function selectModel(modelId) {
 
   if (ws && ws.readyState === WebSocket.OPEN) {
     sendApp({ type: 'update_config', key: 'model', value: modelId });
+    showGestureToast(`已切换模型：${modelDisplayName(modelId)}`);
+  } else {
+    showGestureToast('未连接，切换不会生效');
   }
 }
 
@@ -3007,6 +3040,7 @@ function selectEffort(effortId) {
   modelPopupMenu.classList.add('hidden');
 
   sendApp({ type: 'update_config', key: 'effort', value: selectedEffort });
+  showGestureToast(`推理强度：${effortLabel(selectedEffort)}`);
 }
 
 btnAddFile.addEventListener('click', () => {
@@ -3398,6 +3432,17 @@ document.addEventListener('click', (e) => {
       loadFullHistory(currentThreadId);
     } else if (action === 'toggle-prompt') {
       toggleUserPrompt(actionEl);
+    } else if (action === 'toggle-reasoning') {
+      const card = document.getElementById(actionEl.dataset.target);
+      if (card) {
+        const body = card.querySelector('.reasoning-body');
+        const icon = card.querySelector('.reasoning-toggle-icon');
+        const preview = card.querySelector('.reasoning-preview');
+        const expanded = body && body.style.display !== 'none';
+        if (body) body.style.display = expanded ? 'none' : '';
+        if (icon) icon.textContent = expanded ? '▸' : '▾';
+        if (preview) preview.style.display = expanded ? '' : 'none';
+      }
     } else if (action === 'toggle-show-all') {
       const list = actionEl.previousElementSibling;
       if (list) list.classList.toggle('show-all');
